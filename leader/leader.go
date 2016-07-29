@@ -197,7 +197,7 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 					continue
 				}
 			}
-			// if nothing has changed and we previously sent this subscriber values,
+			// if nothing has changed and we previously sent this subscriber this value,
 			// do not bother subscriber with extra notifications
 			if re.PrevNode != nil && re.PrevNode.Value == re.Node.Value && sentAnything {
 				continue
