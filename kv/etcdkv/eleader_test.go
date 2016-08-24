@@ -1,13 +1,12 @@
-package leader
+package etcdkv
 
 import (
 	"fmt"
 	"os"
-	"strings"
-	"testing"
+	"strconv"
 	"time"
 
-	"github.com/gravitational/coordinate/config"
+	"github.com/gravitational/coordinate/defaults"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/client"
@@ -16,27 +15,30 @@ import (
 	. "gopkg.in/check.v1"
 )
 
-func TestLeader(t *testing.T) { TestingT(t) }
-
 type LeaderSuite struct {
-	nodes []string
+	config string
 }
 
 var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
 	log.SetOutput(os.Stderr)
-	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
-	if nodesString == "" {
-		// Skips the entire suite
-		c.Skip("This test requires etcd, provide comma separated nodes in COORDINATE_TEST_ETCD_NODES environment variable")
+
+	testETCD := os.Getenv(defaults.TestETCD)
+
+	if ok, _ := strconv.ParseBool(testETCD); !ok {
+		c.Skip("Skipping test suite for ETCD")
 		return
 	}
-	s.nodes = strings.Split(nodesString, ",")
+
+	s.config = os.Getenv(defaults.TestETCDConfig)
 }
 
 func (s *LeaderSuite) newClient(c *C) *Client {
-	clt, err := NewClient(Config{ETCD: &config.Config{Endpoints: s.nodes, HeaderTimeoutPerRequest: 100 * time.Millisecond}})
+	engine, err := NewTemp(s.config)
+	c.Assert(err, IsNil)
+
+	clt, err := NewLeader(LeaderConfig{Client: engine.Engine.client})
 	c.Assert(err, IsNil)
 	return clt
 }
