@@ -64,6 +64,7 @@ func New(cfg Config) (*ETCD, error) {
 	}
 	e := &ETCD{
 		Config:  cfg,
+		Clock:   cfg.Clock,
 		etcdKey: strings.Split(cfg.Key, "/"),
 		cancelC: make(chan bool, 1),
 		stopC:   make(chan bool, 1),
@@ -82,6 +83,7 @@ func New(cfg Config) (*ETCD, error) {
 // ETCD is implementation of etcd key value engine
 type ETCD struct {
 	Config
+	clockwork.Clock
 	etcdKey []string
 	client  client.Client
 	api     client.KeysAPI

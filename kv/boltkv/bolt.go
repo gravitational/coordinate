@@ -89,6 +89,7 @@ func New(cfg Config) (*Bolt, error) {
 	}
 	b := &Bolt{
 		Config: cfg,
+		Clock:  cfg.Clock,
 		locks:  make(map[string]time.Time),
 	}
 
@@ -124,6 +125,7 @@ func New(cfg Config) (*Bolt, error) {
 type Bolt struct {
 	sync.Mutex
 	Config
+	clockwork.Clock
 	db    *bolt.DB
 	locks map[string]time.Time
 }

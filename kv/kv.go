@@ -16,6 +16,8 @@ type Key []string
 
 // Engine is interface to the Key-Value storage
 type Engine interface {
+	// Clock represents clock method
+	clockwork.Clock
 	// Closer closes resources associated with the engine
 	io.Closer
 	// Key creats new key
