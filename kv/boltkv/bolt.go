@@ -395,6 +395,22 @@ func (b *Bolt) GetKeys(key kv.Key) ([]string, error) {
 	return out, nil
 }
 
+func (b *Bolt) IsDir(key kv.Key) (bool, error) {
+	var out interface{}
+	err := b.GetVal(key, &out)
+	if err == nil {
+		return false, nil
+	}
+	err = b.db.View(func(tx *bolt.Tx) error {
+		_, err := getBucket(tx, key)
+		return err
+	})
+	if err != nil {
+		return false, trace.Wrap(err)
+	}
+	return true, nil
+}
+
 // Close closes the backend resources
 func (b *Bolt) Close() error {
 	log.Infof("BOLT closing: %v", b.Path)

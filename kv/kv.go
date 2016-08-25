@@ -40,6 +40,8 @@ type Engine interface {
 	UpsertDir(key Key, ttl time.Duration) error
 	// DeleteDir deletes the lock
 	DeleteDir(key Key) error
+	// IsDir returns whether given key is a directory and exists
+	IsDir(key Key) (bool, error)
 	// AcquireLock blocks until it can acquire lock
 	AcquireLock(token Key, ttl time.Duration) error
 	// TryAcquireLock tries to acquire lock and fails if it's taken

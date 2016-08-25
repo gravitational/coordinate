@@ -260,6 +260,14 @@ func (e *ETCD) ReleaseLock(key kv.Key) error {
 	return ConvertErr(err)
 }
 
+func (e *ETCD) IsDir(key kv.Key) (bool, error) {
+	re, err := e.api.Get(context.TODO(), ekey(key), nil)
+	if err != nil {
+		return false, ConvertErr(err)
+	}
+	return isDir(re.Node), nil
+}
+
 func (e *ETCD) GetKeys(key kv.Key) ([]string, error) {
 	var vals []string
 	re, err := e.api.Get(context.TODO(), ekey(key), nil)

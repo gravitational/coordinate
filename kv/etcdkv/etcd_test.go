@@ -69,3 +69,7 @@ func (s *ESuite) TearDownTest(c *C) {
 func (s *ESuite) TestKeysCRUD(c *C) {
 	s.suite.KeysCRUD(c)
 }
+
+func (s *ESuite) TestDirsCRUD(c *C) {
+	s.suite.DirsCRUD(c)
+}
