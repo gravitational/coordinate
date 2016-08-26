@@ -88,3 +88,7 @@ func (s *BSuite) TestKeysCRUD(c *C) {
 func (s *BSuite) TestDirsCRUD(c *C) {
 	s.suite.DirsCRUD(c)
 }
+
+func (s *BSuite) TestDeleteIf(c *C) {
+	s.suite.DeleteIf(c)
+}

@@ -222,6 +222,23 @@ func (e *ETCD) GetVal(key kv.Key, val interface{}) error {
 	return trace.Wrap(err)
 }
 
+// DeleteKeyIf deletes key if the previous version matches the passed one
+func (e *ETCD) DeleteKeyIf(key kv.Key, expected interface{}) error {
+	if expected == nil {
+		return trace.BadParameter("missing parameter 'expected'")
+	}
+	encoded, err := e.Codec.EncodeToString(expected)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = e.api.Delete(context.TODO(), ekey(key),
+		&client.DeleteOptions{
+			Dir:       false,
+			PrevValue: encoded,
+		})
+	return ConvertErr(err)
+}
+
 func (e *ETCD) DeleteKey(key kv.Key) error {
 	_, err := e.api.Delete(context.TODO(), ekey(key), nil)
 	return ConvertErr(err)

@@ -44,3 +44,16 @@ func (s *EngineSuite) DirsCRUD(c *C) {
 	_, err = s.E.IsDir(s.E.Key("c"))
 	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%T", err))
 }
+
+func (s *EngineSuite) DeleteIf(c *C) {
+	val := "hello"
+	key := s.E.Key("a", "b")
+	err := s.E.CreateVal(key, val, kv.Forever)
+	c.Assert(err, IsNil)
+
+	err = s.E.DeleteKeyIf(key, "hello1")
+	c.Assert(trace.IsCompareFailed(err), Equals, true, Commentf("%T", err))
+
+	err = s.E.DeleteKeyIf(key, "hello")
+	c.Assert(err, IsNil)
+}

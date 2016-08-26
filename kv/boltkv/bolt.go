@@ -334,6 +334,31 @@ func (b *Bolt) DeleteKey(k kv.Key) error {
 	})
 }
 
+func (b *Bolt) DeleteKeyIf(k kv.Key, expected interface{}) error {
+	if expected == nil {
+		return trace.BadParameter("missing parameter 'expected'")
+	}
+	encoded, err := b.Codec.EncodeToBytes(expected)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	buckets, key := b.split(k)
+	return b.db.Update(func(tx *bolt.Tx) error {
+		bkt, err := getBucket(tx, buckets)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		existing := bkt.Get([]byte(key))
+		if existing == nil {
+			return trace.NotFound("%v is not found", key)
+		}
+		if bytes.Compare(existing, encoded) != 0 {
+			return trace.CompareFailed("expected %v got %v", string(encoded), string(existing))
+		}
+		return bkt.Delete([]byte(key))
+	})
+}
+
 func (b *Bolt) DeleteDir(k kv.Key) error {
 	buckets, key := b.split(k)
 	return b.db.Update(func(tx *bolt.Tx) error {

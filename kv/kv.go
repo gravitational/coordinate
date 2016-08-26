@@ -34,6 +34,8 @@ type Engine interface {
 	GetVal(key Key, val interface{}) error
 	// DeleteKey deletes key
 	DeleteKey(key Key) error
+	// DeleteKeyIf deletes key if the previous version matches the passed one
+	DeleteKeyIf(key Key, expected interface{}) error
 	// CreateDir creates new directory
 	CreateDir(key Key, ttl time.Duration) error
 	// UpsertDir creates or updates existing directory
