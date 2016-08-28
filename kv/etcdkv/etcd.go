@@ -203,7 +203,8 @@ func (e *ETCD) CompareAndSwap(key kv.Key, val interface{}, prevVal interface{}, 
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	if re.PrevNode != nil {
+
+	if re != nil && re.PrevNode != nil {
 		err = e.Codec.DecodeFromString(re.PrevNode.Value, outVal)
 		return trace.Wrap(err)
 	}
