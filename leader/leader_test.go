@@ -36,7 +36,14 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 }
 
 func (s *LeaderSuite) newClient(c *C) *Client {
-	clt, err := NewClient(Config{ETCD: &config.Config{Endpoints: s.nodes, HeaderTimeoutPerRequest: 100 * time.Millisecond}})
+	clt, err := NewClient(
+		Config{
+			ETCD: &config.Config{
+				Endpoints:               s.nodes,
+				HeaderTimeoutPerRequest: 100 * time.Millisecond,
+			},
+		},
+	)
 	c.Assert(err, IsNil)
 	return clt
 }
@@ -93,6 +100,44 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 
 	// now, shut down voter a
 	c.Assert(clta.Close(), IsNil)
+	// in a second, we should see the leader has changed
+	time.Sleep(time.Second)
+
+	// make sure we've elected voter b
+	select {
+	case val := <-changeC:
+		c.Assert(val, Equals, "voter b")
+	case <-time.After(time.Second):
+		c.Fatalf("timeout waiting for event")
+	}
+}
+
+func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
+	clt := s.newClient(c)
+	defer s.closeClient(c, clt)
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+
+	changeC := make(chan string)
+	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+		changeC <- newVal
+	})
+	voter, err := clt.AddVoter(key, "voter a", time.Second)
+	c.Assert(err, IsNil)
+
+	// make sure we've elected voter a
+	select {
+	case val := <-changeC:
+		c.Assert(val, Equals, "voter a")
+	case <-time.After(time.Second):
+		c.Fatalf("timeout waiting for event")
+	}
+
+	// add another voter
+	clt.AddVoter(key, "voter b", time.Second)
+
+	// now, shut down voter a
+	c.Assert(voter.Close(), IsNil)
 	// in a second, we should see the leader has changed
 	time.Sleep(time.Second)
 
