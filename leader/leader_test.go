@@ -73,6 +73,28 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	}
 }
 
+func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
+	clt := s.newClient(c)
+	defer s.closeClient(c, clt)
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+
+	changeC := make(chan string)
+	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+		changeC <- newVal
+	})
+	api := client.NewKeysAPI(clt.client)
+	_, err := api.Set(context.TODO(), key, "first", nil)
+	c.Assert(err, IsNil)
+
+	select {
+	case val := <-changeC:
+		c.Assert(val, Equals, "first")
+	case <-time.After(time.Second):
+		c.Fatalf("timeout waiting for event")
+	}
+}
+
 func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	clta := s.newClient(c)
 
