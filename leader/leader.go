@@ -49,6 +49,7 @@ type Client struct {
 	client client.Client
 	clock  clockwork.Clock
 	closeC chan bool
+	pauseC chan bool
 	closed uint32
 }
 
@@ -75,6 +76,7 @@ func NewClient(cfg Config) (*Client, error) {
 		client: client,
 		clock:  cfg.Clock,
 		closeC: make(chan bool),
+		pauseC: make(chan bool),
 	}, nil
 }
 
@@ -244,6 +246,21 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 		defer ticker.Stop()
 		for {
 			select {
+			case <-l.pauseC:
+				log.Infof("was asked to step down, pausing heartbeat")
+				select {
+				case <-time.After(term * 2):
+				case <-l.closeC:
+					log.Infof("client is closing, return")
+					return
+				case <-context.Done():
+					log.Infof("removing voter for %v", value)
+					return
+				}
+			default:
+			}
+
+			select {
 			case <-ticker.C:
 				err := l.elect(key, value, term)
 				if err != nil {
@@ -259,6 +276,11 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 		}
 	}()
 	return nil
+}
+
+// StepDown makes this participant to pause his attempts to re-elect itself thus giving up its leadership
+func (l *Client) StepDown() {
+	l.pauseC <- true
 }
 
 // getFirstValue returns the current value for key if it exists, or waits
