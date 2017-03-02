@@ -181,11 +181,11 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 				}
 
 				if err == context.Canceled {
-					log.Debugf("client is closing, return")
+					log.Debug("client is closing, return")
 					return
 				} else if cerr, ok := err.(*client.ClusterError); ok {
 					if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
-						log.Debugf("client is closing, return")
+						log.Debug("client is closing, return")
 						return
 					}
 					log.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
