@@ -247,11 +247,11 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 		for {
 			select {
 			case <-l.pauseC:
-				log.Infof("was asked to step down, pausing heartbeat")
+				log.Info("was asked to step down, pausing heartbeat")
 				select {
 				case <-time.After(term * 2):
 				case <-l.closeC:
-					log.Infof("client is closing, return")
+					log.Info("client is closing, return")
 					return
 				case <-context.Done():
 					log.Infof("removing voter for %v", value)
@@ -267,7 +267,7 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 					log.Infof("voter error: %v", err)
 				}
 			case <-l.closeC:
-				log.Infof("client is closing, return")
+				log.Info("client is closing, return")
 				return
 			case <-context.Done():
 				log.Infof("removing voter for %v", value)
