@@ -224,3 +224,44 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 		}
 	}
 }
+
+func (s *LeaderSuite) TestStepDown(c *C) {
+	clta := s.newClient(c)
+	defer s.closeClient(c, clta)
+
+	cltb := s.newClient(c)
+	defer s.closeClient(c, cltb)
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+
+	changeC := make(chan string)
+	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+		changeC <- newVal
+	})
+
+	// add voter a
+	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
+
+	// make sure we've elected voter a
+	select {
+	case val := <-changeC:
+		c.Assert(val, Equals, "voter a")
+	case <-time.After(time.Second):
+		c.Fatalf("timeout waiting for event")
+	}
+
+	// add voter b
+	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
+
+	// tell voter a to step down and wait for the next term
+	clta.StepDown()
+	time.Sleep(time.Second)
+
+	// make sure voter b is elected
+	select {
+	case val := <-changeC:
+		c.Assert(val, Equals, "voter b")
+	case <-time.After(time.Second):
+		c.Fatalf("timeout waiting for event")
+	}
+}
