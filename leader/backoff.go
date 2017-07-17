@@ -1,52 +1,38 @@
 package leader
 
 import (
-	"math"
-	"math/rand"
 	"time"
 
-	"github.com/cenk/backoff"
+	"github.com/cenkalti/backoff"
 )
 
-// FreebieExponentialBackOff
-type FreebieExponentialBackOff struct {
-	InitialInterval     time.Duration
-	RandomizationFactor float64
-	Multiplier          float64
-	MaxInterval         time.Duration
-	MaxElapsedTime      time.Duration
-
-	tries   int
-	elapsed time.Duration
-}
-
-// NextBackOff returns the duration of the next backoff interval
-func (f *FreebieExponentialBackOff) NextBackOff() time.Duration {
-	f.tries++
-	if f.tries == 1 {
-		return time.Duration(0)
-	} else {
-		delay := float64(f.InitialInterval) * math.Pow(f.Multiplier, float64(f.tries-2))
-		jitter := (rand.Float64() - 0.5) * f.RandomizationFactor * float64(f.InitialInterval)
-		delay += jitter
-		if delay >= float64(f.MaxInterval) {
-			delay = float64(f.MaxInterval)
-		}
-		f.elapsed += time.Duration(delay)
-		if f.elapsed > f.MaxElapsedTime {
-			return backoff.Stop
-		}
-		return time.Duration(delay)
+func NewCountingBackOff(backOff backoff.BackOff) *CountingBackOff {
+	return &CountingBackOff{
+		backoff: backOff,
 	}
 }
 
-// Reset resets the number of tries on this backoff counter to zero
-func (f *FreebieExponentialBackOff) Reset() {
-	f.tries = 0
-	f.elapsed = time.Duration(0)
+// CountingBackOff is an exponential backoff that
+// counts the number of backoff steps
+type CountingBackOff struct {
+	backoff backoff.BackOff
+
+	tries int
 }
 
-// CurrentTries returns the number of attempts on this backoff counter
-func (f *FreebieExponentialBackOff) CurrentTries() int {
+// NextBackOff returns the duration of the next backoff interval
+func (f *CountingBackOff) NextBackOff() time.Duration {
+	f.tries++
+	return f.backoff.NextBackOff()
+}
+
+// Reset resets the number of tries on this backoff counter to zero
+func (f *CountingBackOff) Reset() {
+	f.tries = 0
+	f.backoff.Reset()
+}
+
+// NumTries returns the number of attempts on this backoff counter
+func (f *CountingBackOff) NumTries() int {
 	return f.tries
 }
