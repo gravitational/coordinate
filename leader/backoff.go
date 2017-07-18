@@ -28,13 +28,13 @@ func (f *CountingBackOff) NextBackOff() time.Duration {
 	return f.backoff.NextBackOff()
 }
 
-// Reset resets the number of tries on this backoff counter to zero
+// Reset resets both the number of steps and the backoff interval to zero
 func (f *CountingBackOff) Reset() {
 	f.tries = 0
 	f.backoff.Reset()
 }
 
-// NumTries returns the number of attempts on this backoff counter
+// NumTries returns the number of steps taken along this backoff interval
 func (f *CountingBackOff) NumTries() int {
 	return f.tries
 }
@@ -49,7 +49,7 @@ func NewFlippingBackOff(regular, failing backoff.BackOff) *FlippingBackOff {
 }
 
 // Failing resets the failing state to failing.
-// If failing == false, the failing backoff is reset.
+// If failing == false, the failing backoff interval is reset.
 func (r *FlippingBackOff) Failing(failing bool) {
 	r.isFailing = failing
 	if !failing {
@@ -66,19 +66,20 @@ func (r *FlippingBackOff) NextBackOff() time.Duration {
 	}
 }
 
-// Reset resets the underlying backoffs
+// Reset resets the underlying backoff intervals
 func (r *FlippingBackOff) Reset() {
 	r.regular.Reset()
 	r.failing.Reset()
 }
 
-// FlippingBackOff provides a backoff using two backoff implementations.
-// First implementation is used to provide regular spaced notifications,
-// while the second implementation is used to provide notifications if the
-// status has been set to failing.
+// FlippingBackOff provides a backoff using two backoff implementations
+// it alternates between.
+// First implementation is used to provide regular notifications,
+// while the second implementation is used to handle errors.
+//
 // This can be used in conjunction with the backoff.Ticker to provide a custom
-// loop that can dynamically switch to an alternative backoff implementation
-// in case of errors.
+// loop that can dynamically switch between backoff implementations
+// depending on state of an operation (e.g. healthy vs experiencing transient errors).
 type FlippingBackOff struct {
 	regular, failing backoff.BackOff
 	isFailing        bool

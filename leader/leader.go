@@ -204,7 +204,7 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 
 		select {
 		case b := <-ticker.C:
-			log.Debugf("backoff %v", prefix, b)
+			log.Debugf("backoff %v", b)
 		case <-ctx.Done():
 			return
 		case <-l.closeC:
@@ -313,7 +313,7 @@ func (l *Client) StepDown() {
 // instead we rely on watchers
 func (l *Client) elect(ctx context.Context, key, value string, term time.Duration) error {
 	candidate := fmt.Sprintf("candidate(key=%v, value=%v, term=%v)", key, value, term)
-	log := log.WithFields(log.Fields{"candiate": candidate})
+	log := log.WithFields(log.Fields{"candidate": candidate})
 
 	api := client.NewKeysAPI(l.client)
 	resp, err := api.Get(ctx, key, nil)

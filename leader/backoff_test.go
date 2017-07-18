@@ -23,7 +23,7 @@ func (c *TestClock) Now() time.Time {
 	return t
 }
 
-func (s *BackOffSuite) TestBackOff(c *C) {
+func (s *BackOffSuite) TestCountsSteps(c *C) {
 	backoff := &CountingBackOff{
 		backoff: backoff.NewExponentialBackOff(),
 	}
@@ -34,4 +34,23 @@ func (s *BackOffSuite) TestBackOff(c *C) {
 
 	backoff.Reset()
 	c.Assert(backoff.NumTries(), Equals, 0)
+}
+
+func (s *BackOffSuite) TestAlternatesIntervals(c *C) {
+	backoff := NewFlippingBackOff(
+		backoff.NewConstantBackOff(1*time.Second),
+		backoff.NewExponentialBackOff(),
+	)
+
+	backoff.NextBackOff()
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
+
+	backoff.Failing(true)
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Not(Equals), 1*time.Second)
+
+	backoff.Failing(false)
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
 }
