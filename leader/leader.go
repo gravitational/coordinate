@@ -114,7 +114,7 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 		return nil, nil, trace.Wrap(err, "failed to fetch value")
 	}
 	if resp == nil {
-		log.Debugf("client is closing")
+		log.Debug("client is closing")
 		return nil, nil, nil
 	}
 
@@ -135,7 +135,7 @@ func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, 
 	api := client.NewKeysAPI(l.client)
 	renew := func() (client.Watcher, *client.Response) {
 		b := backoff.NewExponentialBackOff()
-		// Can only be cancelled by cancelling the context
+		// No time limit
 		b.MaxElapsedTime = 0
 		var watcher client.Watcher
 		var resp *client.Response
@@ -152,9 +152,7 @@ func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, 
 
 func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, valuesC chan string) {
 	log := log.WithFields(log.Fields{"watch": prefix})
-	defer func() {
-		log.Debug("watch is closing")
-	}()
+	defer log.Debug("watcher is closing")
 
 	watcher, resp := renew()
 	if watcher == nil {
@@ -183,22 +181,18 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 		return true
 	}
 
-	if !send() {
-		return
-	}
-
 	backOff := NewCountingBackOff(backoff.NewExponentialBackOff())
 	ticker := backoff.NewTicker(backOff)
 
 	var err error
 	for {
+		if !send() {
+			return
+		}
+
 		resp, err = watcher.Next(ctx)
 		if err == nil {
 			backOff.Reset()
-
-			if !send() {
-				return
-			}
 			continue
 		}
 
@@ -235,7 +229,6 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 				}
 				backOff.Reset()
 			}
-
 			continue
 		}
 	}
@@ -262,13 +255,13 @@ func (l *Client) AddVoter(ctx context.Context, key, value string, term time.Dura
 
 func (l *Client) voter(ctx context.Context, key, value string, term time.Duration) {
 	log := log.WithFields(log.Fields{"value": value})
-	defer func() {
-		log.Debug("voter is closing")
-	}()
+	defer log.Debug("voter is closing")
 
+	failBackoff := backoff.NewExponentialBackOff()
+	failBackoff.MaxElapsedTime = 0 // No time limit
 	b := NewFlippingBackOff(
 		backoff.NewConstantBackOff(term/5),
-		backoff.NewExponentialBackOff(),
+		failBackoff,
 	)
 
 	ticker := backoff.NewTicker(b)

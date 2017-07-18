@@ -26,7 +26,6 @@ var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
 	log.SetOutput(os.Stderr)
-	log.SetLevel(log.DebugLevel)
 	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
 	if nodesString == "" {
 		// Skips the entire suite
@@ -201,13 +200,12 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 
 	changeC := make(chan string)
 	clt.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		log.Debugf("prev: %v, new: %v", prevVal, newVal)
 		changeC <- newVal
 	})
 
 	last := ""
-	log.Info("setting our key 5 times")
-	for i := 0; i < 50; i++ {
+	log.Info("setting our key 1100 times")
+	for i := 0; i < 1100; i++ {
 		val := fmt.Sprintf("%v", uuid.New())
 		kapi.Set(context.TODO(), key, val, nil)
 		last = val
@@ -216,7 +214,6 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	for {
 		select {
 		case val := <-changeC:
-			log.Infof("got value: %s last: %s", val, last)
 			if val == last {
 				log.Infof("got expected final value from watch")
 				return
