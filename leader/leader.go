@@ -134,9 +134,7 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, valuesC chan string) {
 	api := client.NewKeysAPI(l.client)
 	renew := func() (client.Watcher, *client.Response) {
-		b := backoff.NewExponentialBackOff()
-		// No time limit
-		b.MaxElapsedTime = 0
+		b := NewUnlimitedExponentialBackOff()
 		var watcher client.Watcher
 		var resp *client.Response
 		backoff.Retry(func() (err error) {
@@ -181,7 +179,7 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 		return true
 	}
 
-	backOff := NewCountingBackOff(backoff.NewExponentialBackOff())
+	backOff := NewCountingBackOff(NewUnlimitedExponentialBackOff())
 	ticker := backoff.NewTicker(backOff)
 
 	var err error
@@ -257,11 +255,9 @@ func (l *Client) voter(ctx context.Context, key, value string, term time.Duratio
 	log := log.WithFields(log.Fields{"value": value})
 	defer log.Debug("voter is closing")
 
-	failBackoff := backoff.NewExponentialBackOff()
-	failBackoff.MaxElapsedTime = 0 // No time limit
 	b := NewFlippingBackOff(
 		backoff.NewConstantBackOff(term/5),
-		failBackoff,
+		NewUnlimitedExponentialBackOff(),
 	)
 
 	ticker := backoff.NewTicker(b)
