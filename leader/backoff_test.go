@@ -30,10 +30,10 @@ func (s *BackOffSuite) TestCountsSteps(c *C) {
 
 	backoff.NextBackOff()
 	backoff.NextBackOff()
-	c.Assert(backoff.NumTries(), Equals, 2)
+	c.Assert(backoff.Tries(), Equals, 2)
 
 	backoff.Reset()
-	c.Assert(backoff.NumTries(), Equals, 0)
+	c.Assert(backoff.Tries(), Equals, 0)
 }
 
 func (s *BackOffSuite) TestAlternatesIntervals(c *C) {
@@ -46,11 +46,11 @@ func (s *BackOffSuite) TestAlternatesIntervals(c *C) {
 	backoff.NextBackOff()
 	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
 
-	backoff.Failing(true)
+	backoff.SetFailing(true)
 	backoff.NextBackOff()
 	c.Assert(backoff.NextBackOff(), Not(Equals), 1*time.Second)
 
-	backoff.Failing(false)
+	backoff.SetFailing(false)
 	backoff.NextBackOff()
 	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
 }

@@ -157,7 +157,7 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 		return
 	}
 
-	// send sends the response value on the changes channel.
+	// send sends the response value to the valuesC channel.
 	// Returns false if the close notification has been received
 	send := func() bool {
 		if resp.Node.Value == "" {
@@ -212,15 +212,15 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 			log.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
 			continue
 		} else if IsWatchExpired(err) {
-			log.Debugf("watch index error, resetting watch index: %v", err)
+			log.Debugf("watch index error, resetting watch index: %v", trace.DebugReport(err))
 			watcher, resp = renew()
 			if watcher == nil {
 				return
 			}
 		} else {
-			log.Debugf("unexpected watch error: %v", err)
+			log.Debugf("unexpected watch error: %v", trace.DebugReport(err))
 			// try recreating the watch if we get repeated unknown errors
-			if backOff.NumTries() > 10 {
+			if backOff.Tries() > 10 {
 				watcher, resp = renew()
 				if watcher == nil {
 					return
@@ -278,10 +278,10 @@ func (l *Client) voter(ctx context.Context, key, value string, term time.Duratio
 			log.Debug("electing")
 			err := l.elect(ctx, key, value, term)
 			if err != nil {
-				log.Debugf("voter error: %v", err)
-				b.Failing(true)
+				log.Debugf("voter error: %v", trace.DebugReport(err))
+				b.SetFailing(true)
 			} else {
-				b.Failing(false)
+				b.SetFailing(false)
 			}
 		case <-l.closeC:
 			return
