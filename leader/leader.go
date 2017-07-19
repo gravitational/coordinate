@@ -105,20 +105,17 @@ func (l *Client) AddWatchCallback(ctx context.Context, key string, retry time.Du
 	}()
 }
 
-func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, retry time.Duration) (client.Watcher, *client.Response, error) {
-	prefix := ctx.Value("prefix")
-	log := log.WithFields(log.Fields{"watch": prefix})
-
+func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, entry *log.Entry) (client.Watcher, *client.Response, error) {
 	resp, err := api.Get(ctx, key, nil)
 	if err != nil {
 		return nil, nil, trace.Wrap(err, "failed to fetch value")
 	}
 	if resp == nil {
-		log.Debug("client is closing")
+		entry.Debug("client is closing")
 		return nil, nil, nil
 	}
 
-	log.Debugf("got current value %q for key %q", resp.Node.Value, key)
+	entry.Debugf("got current value %q for key %q", resp.Node.Value, key)
 	watcher := api.Watcher(key, &client.WatcherOptions{
 		// Response.Index corresponds to X-Etcd-Index response header field
 		// and is the recommended starting point after a history miss of over
@@ -133,24 +130,28 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 // The watch can be stopped either with the the specified context or Client.Close
 func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, valuesC chan string) {
 	api := client.NewKeysAPI(l.client)
+	entry := log.WithFields(log.Fields{"prefix": fmt.Sprintf("AddWatch(key=%v)", key)})
+	renewCtx, cancel := context.WithCancel(ctx)
 	renew := func() (client.Watcher, *client.Response) {
 		b := NewUnlimitedExponentialBackOff()
+		b.InitialInterval = retry
 		var watcher client.Watcher
 		var resp *client.Response
 		backoff.Retry(func() (err error) {
-			watcher, resp, err = l.recreateWatchAtLatestIndex(ctx, api, key, retry)
+			watcher, resp, err = l.recreateWatchAtLatestIndex(renewCtx, api, key, entry)
 			return trace.Wrap(err)
 		}, b)
 		return watcher, resp
 	}
 
-	prefix := fmt.Sprintf("AddWatch(key=%v)", key)
-	go l.watcher(ctx, prefix, renew, valuesC)
+	go l.watcher(ctx, renew, cancel, valuesC, entry)
 }
 
-func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, valuesC chan string) {
-	log := log.WithFields(log.Fields{"watch": prefix})
-	defer log.Debug("watcher is closing")
+func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.CancelFunc, valuesC chan string, entry *log.Entry) {
+	defer func() {
+		cancel()
+		entry.Debug("watcher is closing")
+	}()
 
 	watcher, resp := renew()
 	if watcher == nil {
@@ -196,7 +197,7 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 
 		select {
 		case b := <-ticker.C:
-			log.Debugf("backoff %v", b)
+			entry.Debugf("backoff %v", b)
 		case <-ctx.Done():
 			return
 		case <-l.closeC:
@@ -209,16 +210,16 @@ func (l *Client) watcher(ctx context.Context, prefix string, renew renewFunc, va
 			if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
 				return
 			}
-			log.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
+			entry.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
 			continue
 		} else if IsWatchExpired(err) {
-			log.Debugf("watch index error, resetting watch index: %v", trace.DebugReport(err))
+			entry.Debugf("watch index error, resetting watch index: %v", trace.DebugReport(err))
 			watcher, resp = renew()
 			if watcher == nil {
 				return
 			}
 		} else {
-			log.Debugf("unexpected watch error: %v", trace.DebugReport(err))
+			entry.Debugf("unexpected watch error: %v", trace.DebugReport(err))
 			// try recreating the watch if we get repeated unknown errors
 			if backOff.Tries() > 10 {
 				watcher, resp = renew()
