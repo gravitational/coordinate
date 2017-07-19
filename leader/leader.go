@@ -317,7 +317,6 @@ func (l *Client) elect(ctx context.Context, key, value string, term time.Duratio
 		return nil
 	}
 	if resp.Node.Value != value {
-		log.Debugf("leader is %q, try again", resp.Node.Value)
 		return nil
 	}
 	if resp.Node.Expiration.Sub(l.clock.Now().UTC()) > time.Duration(term/2) {
