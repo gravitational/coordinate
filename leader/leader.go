@@ -111,11 +111,9 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 		return nil, nil, trace.Wrap(err, "failed to fetch value")
 	}
 	if resp == nil {
-		entry.Debug("client is closing")
 		return nil, nil, nil
 	}
 
-	entry.Debugf("got current value %q for key %q", resp.Node.Value, key)
 	watcher := api.Watcher(key, &client.WatcherOptions{
 		// Response.Index corresponds to X-Etcd-Index response header field
 		// and is the recommended starting point after a history miss of over
@@ -127,7 +125,7 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 
 // AddWatch starts watching the key for changes and sending them
 // to the valuesC.
-// The watch can be stopped either with the the specified context or Client.Close
+// The watch can be stopped either with the specified context or Client.Close
 func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, valuesC chan string) {
 	api := client.NewKeysAPI(l.client)
 	entry := log.WithFields(log.Fields{"prefix": fmt.Sprintf("AddWatch(key=%v)", key)})
@@ -148,10 +146,7 @@ func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, 
 }
 
 func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.CancelFunc, valuesC chan string, entry *log.Entry) {
-	defer func() {
-		cancel()
-		entry.Debug("watcher is closing")
-	}()
+	defer cancel()
 
 	watcher, resp := renew()
 	if watcher == nil {
@@ -180,8 +175,9 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.Ca
 		return true
 	}
 
-	backOff := NewCountingBackOff(NewUnlimitedExponentialBackOff())
+	backOff := NewUnlimitedExponentialBackOff()
 	ticker := backoff.NewTicker(backOff)
+	var steps int
 
 	var err error
 	for {
@@ -196,8 +192,8 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.Ca
 		}
 
 		select {
-		case b := <-ticker.C:
-			entry.Debugf("backoff %v", b)
+		case <-ticker.C:
+			steps += 1
 		case <-ctx.Done():
 			return
 		case <-l.closeC:
@@ -210,23 +206,24 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.Ca
 			if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
 				return
 			}
-			entry.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
+			entry.Warningf("unexpected cluster error: %v (%v)", err, cerr.Detail())
 			continue
 		} else if IsWatchExpired(err) {
-			entry.Debugf("watch index error, resetting watch index: %v", trace.DebugReport(err))
+			entry.Debug("watch expired, resetting watch index")
 			watcher, resp = renew()
 			if watcher == nil {
 				return
 			}
 		} else {
-			entry.Debugf("unexpected watch error: %v", trace.DebugReport(err))
+			entry.Warningf("unexpected watch error: %v", trace.DebugReport(err))
 			// try recreating the watch if we get repeated unknown errors
-			if backOff.Tries() > 10 {
+			if steps > 10 {
 				watcher, resp = renew()
 				if watcher == nil {
 					return
 				}
 				backOff.Reset()
+				steps = 0
 			}
 			continue
 		}
@@ -254,7 +251,6 @@ func (l *Client) AddVoter(ctx context.Context, key, value string, term time.Dura
 
 func (l *Client) voter(ctx context.Context, key, value string, term time.Duration) {
 	log := log.WithFields(log.Fields{"value": value})
-	defer log.Debug("voter is closing")
 
 	b := NewFlippingBackOff(
 		backoff.NewConstantBackOff(term/5),
@@ -272,14 +268,12 @@ func (l *Client) voter(ctx context.Context, key, value string, term time.Duratio
 			case <-l.closeC:
 				return
 			case <-ctx.Done():
-				log.Debug("removing voter")
 				return
 			}
 		case <-ticker.C:
-			log.Debug("electing")
 			err := l.elect(ctx, key, value, term)
 			if err != nil {
-				log.Debugf("voter error: %v", trace.DebugReport(err))
+				log.Warningf("voter error: %v", trace.DebugReport(err))
 				b.SetFailing(true)
 			} else {
 				b.SetFailing(false)
@@ -287,7 +281,6 @@ func (l *Client) voter(ctx context.Context, key, value string, term time.Duratio
 		case <-l.closeC:
 			return
 		case <-ctx.Done():
-			log.Debug("removing voter")
 			return
 		}
 	}

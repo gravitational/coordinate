@@ -6,39 +6,6 @@ import (
 	"github.com/cenkalti/backoff"
 )
 
-// NewCountingBackOff returns a new instance of the CountingBackOff
-// with the specified backoff as implementation
-func NewCountingBackOff(backOff backoff.BackOff) *CountingBackOff {
-	return &CountingBackOff{
-		backoff: backOff,
-	}
-}
-
-// CountingBackOff is a backoff that counts the number of taken steps
-type CountingBackOff struct {
-	backoff backoff.BackOff
-
-	// tries describes the number of backoff steps taken
-	tries int
-}
-
-// NextBackOff returns the duration of the next backoff interval
-func (f *CountingBackOff) NextBackOff() time.Duration {
-	f.tries++
-	return f.backoff.NextBackOff()
-}
-
-// Reset resets both the number of steps and the backoff interval to zero
-func (f *CountingBackOff) Reset() {
-	f.tries = 0
-	f.backoff.Reset()
-}
-
-// Tries returns the number of steps taken along this backoff interval
-func (f *CountingBackOff) Tries() int {
-	return f.tries
-}
-
 // NewFlippingBackOff returns a new instance of the FlippingBackOff
 // using regular and failing as backoff implementations
 func NewFlippingBackOff(regular, failing backoff.BackOff) *FlippingBackOff {
