@@ -138,41 +138,27 @@ func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, 
 		backoff.Retry(func() (err error) {
 			watcher, resp, err = l.recreateWatchAtLatestIndex(renewCtx, api, key, entry)
 			return trace.Wrap(err)
-		}, b)
+		}, backoff.WithContext(b, renewCtx))
 		return watcher, resp
 	}
 
-	go l.watcher(ctx, renew, cancel, valuesC, entry)
+	go func() {
+		defer cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-l.closeC:
+			return
+		}
+	}()
+
+	go l.watcher(ctx, renew, valuesC, entry)
 }
 
-func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.CancelFunc, valuesC chan string, entry *log.Entry) {
-	defer cancel()
-
+func (l *Client) watcher(ctx context.Context, renew renewFunc, valuesC chan string, entry *log.Entry) {
 	watcher, resp := renew()
 	if watcher == nil {
 		return
-	}
-
-	// send sends the response value to the valuesC channel.
-	// Returns false if the close notification has been received
-	send := func() bool {
-		if resp.Node.Value == "" {
-			return true
-		}
-
-		// do not resend the same value twice
-		if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value {
-			return true
-		}
-
-		select {
-		case valuesC <- resp.Node.Value:
-		case <-ctx.Done():
-			return false
-		case <-l.closeC:
-			return false
-		}
-		return true
 	}
 
 	backOff := NewUnlimitedExponentialBackOff()
@@ -181,8 +167,14 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.Ca
 
 	var err error
 	for {
-		if !send() {
-			return
+		if shouldSendValue(*resp) {
+			select {
+			case valuesC <- resp.Node.Value:
+			case <-ctx.Done():
+				return
+			case <-l.closeC:
+				return
+			}
 		}
 
 		resp, err = watcher.Next(ctx)
@@ -228,6 +220,19 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, cancel context.Ca
 			continue
 		}
 	}
+}
+
+func shouldSendValue(resp client.Response) bool {
+	if resp.Node.Value == "" {
+		return false
+	}
+
+	// do not resend the same value twice
+	if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value {
+		return false
+	}
+
+	return true
 }
 
 type renewFunc func() (client.Watcher, *client.Response)
