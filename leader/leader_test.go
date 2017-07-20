@@ -60,7 +60,7 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	clt.AddVoter(context.TODO(), key, "node1", time.Second)
@@ -80,7 +80,7 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	api := client.NewKeysAPI(clt.client)
@@ -104,7 +104,7 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	cltb.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
@@ -141,7 +141,7 @@ func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	ctx, cancel := context.WithCancel(context.TODO())
@@ -199,7 +199,7 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	kapi := client.NewKeysAPI(clt.client)
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 
@@ -207,19 +207,18 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	log.Info("setting our key 1100 times")
 	for i := 0; i < 1100; i++ {
 		val := fmt.Sprintf("%v", uuid.New())
-		kapi.Set(context.Background(), key, val, nil)
+		kapi.Set(context.TODO(), key, val, nil)
 		last = val
 	}
 
 	for {
 		select {
 		case val := <-changeC:
-			log.Infof("got value: %s last: %s", val, last)
 			if val == last {
 				log.Infof("got expected final value from watch")
 				return
 			}
-		case <-time.After(20 * time.Second):
+		case <-time.After(1 * time.Second):
 			c.Fatalf("never got anticipated last value from watch")
 		}
 	}
@@ -235,7 +234,7 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	cltb.AddWatchCallback(context.TODO(), key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 

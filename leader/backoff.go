@@ -1,52 +1,67 @@
 package leader
 
 import (
-	"math"
-	"math/rand"
 	"time"
 
-	"github.com/cenk/backoff"
+	"github.com/cenkalti/backoff"
 )
 
-// FreebieExponentialBackOff
-type FreebieExponentialBackOff struct {
-	InitialInterval     time.Duration
-	RandomizationFactor float64
-	Multiplier          float64
-	MaxInterval         time.Duration
-	MaxElapsedTime      time.Duration
-
-	tries   int
-	elapsed time.Duration
-}
-
-// NextBackOff returns the duration of the next backoff interval
-func (f *FreebieExponentialBackOff) NextBackOff() time.Duration {
-	f.tries++
-	if f.tries == 1 {
-		return time.Duration(0)
-	} else {
-		delay := float64(f.InitialInterval) * math.Pow(f.Multiplier, float64(f.tries-2))
-		jitter := (rand.Float64() - 0.5) * f.RandomizationFactor * float64(f.InitialInterval)
-		delay += jitter
-		if delay >= float64(f.MaxInterval) {
-			delay = float64(f.MaxInterval)
-		}
-		f.elapsed += time.Duration(delay)
-		if f.elapsed > f.MaxElapsedTime {
-			return backoff.Stop
-		}
-		return time.Duration(delay)
+// NewFlippingBackOff returns a new instance of the FlippingBackOff
+// using regular and failing as backoff implementations
+func NewFlippingBackOff(regular, failing backoff.BackOff) *FlippingBackOff {
+	return &FlippingBackOff{
+		regular: regular,
+		failing: failing,
 	}
 }
 
-// Reset resets the number of tries on this backoff counter to zero
-func (f *FreebieExponentialBackOff) Reset() {
-	f.tries = 0
-	f.elapsed = time.Duration(0)
+// SetFailing resets the failing state to failing.
+// If failing == false, the failing backoff interval is reset.
+func (r *FlippingBackOff) SetFailing(failing bool) {
+	r.isFailing = failing
+	if !failing {
+		r.failing.Reset()
+	}
 }
 
-// CurrentTries returns the number of attempts on this backoff counter
-func (f *FreebieExponentialBackOff) CurrentTries() int {
-	return f.tries
+// NextBackOff returns the duration of the next backoff interval
+func (r *FlippingBackOff) NextBackOff() time.Duration {
+	if r.isFailing {
+		return r.failing.NextBackOff()
+	} else {
+		return r.regular.NextBackOff()
+	}
+}
+
+// Reset resets the underlying backoff intervals
+func (r *FlippingBackOff) Reset() {
+	r.regular.Reset()
+	r.failing.Reset()
+}
+
+// FlippingBackOff provides a backoff using two backoff implementations.
+// The backoff implementation can be switched by calling SetFailing with
+// appropriate value.
+//
+// This can be useful in conjunction with the backoff.Ticker to provide a custom
+// loop that can dynamically switch between backoff implementations depending
+// on the state of an operation (e.g. healthy vs having transient errors).
+type FlippingBackOff struct {
+	// regular specifies the backoff implementation to use
+	// for non-error conditions (SetFailing(false))
+	regular backoff.BackOff
+	// failing specifies the backoff implementation to use
+	// for error conditions (SetFailing(true))
+	failing backoff.BackOff
+
+	// isFailing indicates if the failing backoff implementation is in effect
+	isFailing bool
+}
+
+// NewUnlimitedExponentialBackOff returns a new exponential backoff interval
+// w/o time limit
+func NewUnlimitedExponentialBackOff() *backoff.ExponentialBackOff {
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = 0
+	return b
 }

@@ -3,7 +3,7 @@ package leader
 import (
 	"time"
 
-	cbackoff "github.com/cenk/backoff"
+	"github.com/cenkalti/backoff"
 	. "gopkg.in/check.v1"
 )
 
@@ -23,28 +23,21 @@ func (c *TestClock) Now() time.Time {
 	return t
 }
 
-func (s *BackOffSuite) TestBackOff(c *C) {
-	backoff := &FreebieExponentialBackOff{
-		InitialInterval:     500 * time.Millisecond,
-		RandomizationFactor: 0,
-		Multiplier:          2,
-		MaxInterval:         10 * time.Second,
-		MaxElapsedTime:      40 * time.Second,
-	}
+func (s *BackOffSuite) TestAlternatesIntervals(c *C) {
+	backoff := NewFlippingBackOff(
+		backoff.NewConstantBackOff(1*time.Second),
+		backoff.NewExponentialBackOff(),
+	)
 
-	c.Assert(backoff.NextBackOff(), Equals, time.Duration(0))
-	c.Assert(backoff.NextBackOff(), Equals, 500*time.Millisecond)
-	c.Assert(backoff.CurrentTries(), Equals, 2)
+	backoff.NextBackOff()
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
 
-	backoff.Reset()
-	c.Assert(backoff.CurrentTries(), Equals, 0)
-	c.Assert(backoff.NextBackOff(), Equals, time.Duration(0))
-	c.Assert(backoff.NextBackOff(), Equals, 500*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 1000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 2000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 4000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 8000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 10000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, 10000*time.Millisecond)
-	c.Assert(backoff.NextBackOff(), Equals, cbackoff.Stop)
+	backoff.SetFailing(true)
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Not(Equals), 1*time.Second)
+
+	backoff.SetFailing(false)
+	backoff.NextBackOff()
+	c.Assert(backoff.NextBackOff(), Equals, 1*time.Second)
 }
