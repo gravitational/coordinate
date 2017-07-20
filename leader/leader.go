@@ -110,9 +110,6 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 	if err != nil {
 		return nil, nil, trace.Wrap(err, "failed to fetch value")
 	}
-	if resp == nil {
-		return nil, nil, nil
-	}
 
 	watcher := api.Watcher(key, &client.WatcherOptions{
 		// Response.Index corresponds to X-Etcd-Index response header field
@@ -128,18 +125,21 @@ func (l *Client) recreateWatchAtLatestIndex(ctx context.Context, api client.Keys
 // The watch can be stopped either with the specified context or Client.Close
 func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, valuesC chan string) {
 	api := client.NewKeysAPI(l.client)
-	entry := log.WithFields(log.Fields{"prefix": fmt.Sprintf("AddWatch(key=%v)", key)})
+	entry := log.WithFields(log.Fields{"watch": key})
 	renewCtx, cancel := context.WithCancel(ctx)
-	renew := func() (client.Watcher, *client.Response) {
+	renew := func() (client.Watcher, *client.Response, error) {
 		b := NewUnlimitedExponentialBackOff()
 		b.InitialInterval = retry
 		var watcher client.Watcher
 		var resp *client.Response
-		backoff.Retry(func() (err error) {
+		err := backoff.Retry(func() (err error) {
 			watcher, resp, err = l.recreateWatchAtLatestIndex(renewCtx, api, key, entry)
 			return trace.Wrap(err)
 		}, backoff.WithContext(b, renewCtx))
-		return watcher, resp
+		if err != nil {
+			return nil, nil, trace.Wrap(err)
+		}
+		return watcher, resp, nil
 	}
 
 	go func() {
@@ -156,8 +156,18 @@ func (l *Client) AddWatch(ctx context.Context, key string, retry time.Duration, 
 }
 
 func (l *Client) watcher(ctx context.Context, renew renewFunc, valuesC chan string, entry *log.Entry) {
-	watcher, resp := renew()
-	if watcher == nil {
+	var watcher client.Watcher
+	var resp *client.Response
+	var err error
+
+	defer func() {
+		if errClose := trace.Unwrap(err); !isContextErr(errClose) {
+			log.Errorf("watch closing with error: %v", trace.DebugReport(err))
+		}
+	}()
+
+	watcher, resp, err = renew()
+	if err != nil {
 		return
 	}
 
@@ -165,7 +175,6 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, valuesC chan stri
 	ticker := backoff.NewTicker(backOff)
 	var steps int
 
-	var err error
 	for {
 		if shouldSendValue(*resp) {
 			select {
@@ -192,26 +201,27 @@ func (l *Client) watcher(ctx context.Context, renew renewFunc, valuesC chan stri
 			return
 		}
 
-		if err == context.Canceled {
+		if isContextErr(err) {
 			return
 		} else if cerr, ok := err.(*client.ClusterError); ok {
-			if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
+			if len(cerr.Errors) != 0 && isContextErr(cerr.Errors[0]) {
+				err = cerr.Errors[0]
 				return
 			}
 			entry.Warningf("unexpected cluster error: %v (%v)", err, cerr.Detail())
 			continue
 		} else if IsWatchExpired(err) {
 			entry.Debug("watch expired, resetting watch index")
-			watcher, resp = renew()
-			if watcher == nil {
+			watcher, resp, err = renew()
+			if err != nil {
 				return
 			}
 		} else {
 			entry.Warningf("unexpected watch error: %v", trace.DebugReport(err))
 			// try recreating the watch if we get repeated unknown errors
 			if steps > 10 {
-				watcher, resp = renew()
-				if watcher == nil {
+				watcher, resp, err = renew()
+				if err != nil {
 					return
 				}
 				backOff.Reset()
@@ -235,7 +245,12 @@ func shouldSendValue(resp client.Response) bool {
 	return true
 }
 
-type renewFunc func() (client.Watcher, *client.Response)
+func isContextErr(err error) bool {
+	errContext := trace.Unwrap(err)
+	return errContext == context.Canceled || errContext == context.DeadlineExceeded
+}
+
+type renewFunc func() (client.Watcher, *client.Response, error)
 
 // AddVoter starts a goroutine that attempts to set the specified key to
 // to the given value with the time-to-live value specified with term.
