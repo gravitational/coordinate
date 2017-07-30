@@ -10,9 +10,9 @@ import (
 
 	"github.com/gravitational/coordinate/config"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/coreos/etcd/client"
 	"github.com/pborman/uuid"
+	log "github.com/sirupsen/logrus"
 	. "gopkg.in/check.v1"
 )
 
