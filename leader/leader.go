@@ -18,18 +18,19 @@ package leader
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/gravitational/coordinate/config"
-	"github.com/gravitational/trace"
 
 	ebackoff "github.com/cenkalti/backoff"
+	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/client"
 )
+
+var log = logrus.WithField(trace.Component, "leader")
 
 // Config sets leader election configuration options
 type Config struct {
@@ -106,14 +107,19 @@ func (l *Client) AddWatchCallback(key string, retry time.Duration, fn CallbackFn
 }
 
 func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, retry time.Duration) (client.Watcher, *client.Response, error) {
+	logger := log.WithField("key", key)
+	logger.Info("Getting watch at the latest index.")
 	resp, err := l.getFirstValue(key, retry)
 	if err != nil {
-		return nil, nil, trace.BadParameter("%v unexpected error: %v", ctx.Value("prefix"), err)
+		return nil, nil, trace.Wrap(err)
 	} else if resp == nil {
-		log.Debugf("%v client is closing, return", ctx.Value("prefix"))
+		logger.Info("Client is closing.")
 		return nil, nil, nil
 	}
-	log.Debugf("%v got current value '%v' for key '%v'", ctx.Value("prefix"), resp.Node.Value, key)
+	logger.WithFields(logrus.Fields{
+		"value": resp.Node.Value,
+		"index": resp.Index,
+	}).Info("Got current value.")
 	watcher := api.Watcher(key, &client.WatcherOptions{
 		// Response.Index corresponds to X-Etcd-Index response header field
 		// and is the recommended starting point after a history miss of over
@@ -126,15 +132,17 @@ func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, 
 // AddWatch starts watching the key for changes and sending them
 // to the valuesC, the watch is stopped
 func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) {
-	prefix := fmt.Sprintf("AddWatch(key=%v)", key)
 	api := client.NewKeysAPI(l.client)
+
+	logger := log.WithField("key", key)
+	logger.Info("Setting up watch.")
 
 	go func() {
 		var watcher client.Watcher
 		var resp *client.Response
 		var err error
 
-		ctx, closer := context.WithCancel(context.WithValue(context.Background(), "prefix", prefix))
+		ctx, closer := context.WithCancel(context.Background())
 		go func() {
 			<-l.closeC
 			closer()
@@ -146,6 +154,7 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 
 		watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
 		if err != nil {
+			logger.WithError(err).Error("Failed to get watch at the latest index.")
 			return
 		}
 
@@ -154,6 +163,7 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 			select {
 			case valuesC <- resp.Node.Value:
 			case <-l.closeC:
+				logger.Info("Watcher has been closed.")
 				return
 			}
 		}
@@ -182,25 +192,29 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 				}
 
 				if err == context.Canceled {
+					logger.Info("Context has been canceled.")
 					return
 				} else if cerr, ok := err.(*client.ClusterError); ok {
 					if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
+						logger.WithError(cerr).Info("Context has been canceled.")
 						return
 					}
-					log.Debugf("unexpected cluster error: %v (%v)", err, cerr.Detail())
+					logger.WithError(cerr).Errorf("Etcd error: %v.", cerr.Detail())
 					continue
 				} else if IsWatchExpired(err) {
-					log.Debug("watch expired, resetting watch index")
+					logger.Info("Watch has expired, resetting watch index.")
 					watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
 					if err != nil {
+						logger.WithError(err).Error("Failed to get watch at the latest index.")
 						continue
 					}
 				} else {
-					log.Warningf("unexpected watch error: %v", err)
+					logger.WithError(err).Error("Unexpected watch error.")
 					// try recreating the watch if we get repeated unknown errors
 					if steps > 10 {
 						watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
 						if err != nil {
+							logger.WithError(err).Error("Failed to get watch at the latest index.")
 							continue
 						}
 						backoff.Reset()
@@ -219,6 +233,7 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 			case valuesC <- resp.Node.Value:
 				sentAnything = true
 			case <-l.closeC:
+				logger.Info("Watcher is closing.")
 				return
 			}
 		}
@@ -237,23 +252,29 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 	if term < time.Second {
 		return trace.BadParameter("term cannot be < 1s")
 	}
+	logger := log.WithFields(logrus.Fields{
+		"key":   key,
+		"value": value,
+		"term":  term,
+	})
 	go func() {
-		err := l.elect(key, value, term)
+		err := l.elect(context, key, value, term, logger)
 		if err != nil {
-			log.Debugf("voter error: %v", err)
+			logger.WithError(err).Error("Failed to run election term.")
 		}
 		ticker := time.NewTicker(term / 5)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-l.pauseC:
-				log.Debug("was asked to step down, pausing heartbeat")
+				logger.Info("Was asked to step down, pausing heartbeat.")
 				select {
 				case <-time.After(term * 2):
 				case <-l.closeC:
+					logger.Info("Client closed, removing voter.")
 					return
 				case <-context.Done():
-					log.Debugf("removing voter for %v", value)
+					logger.Info("Context done, removing voter.")
 					return
 				}
 			default:
@@ -261,14 +282,15 @@ func (l *Client) AddVoter(context context.Context, key, value string, term time.
 
 			select {
 			case <-ticker.C:
-				err := l.elect(key, value, term)
+				err := l.elect(context, key, value, term, logger)
 				if err != nil {
-					log.Debugf("voter error: %v", err)
+					logger.WithError(err).Error("Failed to run election term.")
 				}
 			case <-l.closeC:
+				logger.Info("Client closed, removing voter.")
 				return
 			case <-context.Done():
-				log.Debugf("removing voter for %v", value)
+				logger.Info("Context done, removing voter.")
 				return
 			}
 		}
@@ -292,12 +314,14 @@ func (l *Client) getFirstValue(key string, retryPeriod time.Duration) (*client.R
 		if err == nil {
 			return resp, nil
 		} else if !IsNotFound(err) {
-			log.Debugf("unexpected watcher error: %v", err)
+			log.WithError(err).WithField("key", key).Error("Failed to query key.")
+		} else {
+			log.WithField("key", key).Info("Key not found, will retry.")
 		}
 		select {
 		case <-tick.C:
 		case <-l.closeC:
-			log.Debug("watcher got client close signal")
+			log.Info("Watcher got client close signal.")
 			return nil, nil
 		}
 	}
@@ -306,23 +330,22 @@ func (l *Client) getFirstValue(key string, retryPeriod time.Duration) (*client.R
 // elect is taken from: https://github.com/kubernetes/contrib/blob/master/pod-master/podmaster.go
 // this is a slightly modified version though, that does not return the result
 // instead we rely on watchers
-func (l *Client) elect(key, value string, term time.Duration) error {
-	candidate := fmt.Sprintf("candidate(key=%v, value=%v, term=%v)", key, value, term)
+func (l *Client) elect(ctx context.Context, key, value string, term time.Duration, logger logrus.FieldLogger) error {
 	api := client.NewKeysAPI(l.client)
-	resp, err := api.Get(context.TODO(), key, nil)
+	resp, err := api.Get(ctx, key, nil)
 	if err != nil {
 		if !IsNotFound(err) {
 			return trace.Wrap(err)
 		}
 		// try to grab the lock for the given term
-		_, err := api.Set(context.TODO(), key, value, &client.SetOptions{
+		_, err := api.Set(ctx, key, value, &client.SetOptions{
 			TTL:       term,
 			PrevExist: client.PrevNoExist,
 		})
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		log.Debugf("%v successfully elected", candidate)
+		logger.Info("Acquired lease.")
 		return nil
 	}
 	if resp.Node.Value != value {
@@ -333,7 +356,7 @@ func (l *Client) elect(key, value string, term time.Duration) error {
 	}
 
 	// extend the lease before the current expries
-	_, err = api.Set(context.TODO(), key, value, &client.SetOptions{
+	_, err = api.Set(ctx, key, value, &client.SetOptions{
 		TTL:       term,
 		PrevValue: value,
 		PrevIndex: resp.Node.ModifiedIndex,
@@ -341,7 +364,7 @@ func (l *Client) elect(key, value string, term time.Duration) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	log.Debugf("%v extended lease", candidate)
+	logger.Debug("Extended lease.")
 	return nil
 }
 
