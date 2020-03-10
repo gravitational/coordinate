@@ -47,6 +47,7 @@ type Config struct {
 // that helps to elect new leaders for a given key and
 // monitors the changes to the leaders
 type Client struct {
+	Config
 	client client.Client
 	clock  clockwork.Clock
 	closeC chan bool
@@ -74,6 +75,7 @@ func NewClient(cfg Config) (*Client, error) {
 		}
 	}
 	return &Client{
+		Config: cfg,
 		client: client,
 		clock:  cfg.Clock,
 		closeC: make(chan bool),
@@ -106,36 +108,47 @@ func (l *Client) AddWatchCallback(key string, retry time.Duration, fn CallbackFn
 	}()
 }
 
-func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, retry time.Duration) (client.Watcher, *client.Response, error) {
+func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, retry time.Duration, valuesC chan string) client.Watcher {
 	logger := log.WithField("key", key)
-	logger.Info("Getting watch at the latest index.")
-	resp, err := l.getFirstValue(key, retry)
-	if err != nil {
-		return nil, nil, trace.Wrap(err)
-	} else if resp == nil {
+	logger.Info("Recreating watch at the latest index.")
+	resp := l.getFirstValue(key, retry)
+	if resp == nil {
 		logger.Info("Client is closing.")
-		return nil, nil, nil
+		return nil
 	}
-	logger.WithFields(logrus.Fields{
-		"value": resp.Node.Value,
-		"index": resp.Index,
-	}).Info("Got current value.")
+	// After reestablishing the watch, always send the value we got to the client.
+	if resp.Node != nil {
+		logger.WithFields(logrus.Fields{
+			"value": resp.Node.Value,
+			"index": resp.Index,
+		}).Info("Got current value.")
+		select {
+		case valuesC <- resp.Node.Value:
+		case <-l.closeC:
+			logger.Info("Watcher has been closed.")
+			return nil
+		}
+	}
+	// The watcher that will be receiving events after the value we got above.
 	watcher := api.Watcher(key, &client.WatcherOptions{
 		// Response.Index corresponds to X-Etcd-Index response header field
 		// and is the recommended starting point after a history miss of over
 		// 1000 events
 		AfterIndex: resp.Index,
 	})
-	return watcher, resp, nil
+	return watcher
 }
 
 // AddWatch starts watching the key for changes and sending them
-// to the valuesC, the watch is stopped
+// to the valuesC until the client is stopped.
 func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) {
 	api := client.NewKeysAPI(l.client)
 
 	logger := log.WithField("key", key)
-	logger.Info("Setting up watch.")
+	logger.WithFields(logrus.Fields{
+		"peers": l.ETCD.Endpoints,
+		"retry": retry,
+	}).Info("Setting up watch.")
 
 	go func() {
 		var watcher client.Watcher
@@ -150,29 +163,16 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 
 		backoff := NewUnlimitedExponentialBackOff()
 		ticker := ebackoff.NewTicker(backoff)
+
 		var steps int
-
-		watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
-		if err != nil {
-			logger.WithError(err).Error("Failed to get watch at the latest index.")
-			return
-		}
-
-		// make sure we always send the first actual value
-		if resp != nil && resp.Node != nil {
-			select {
-			case valuesC <- resp.Node.Value:
-			case <-l.closeC:
-				logger.Info("Watcher has been closed.")
-				return
-			}
-		}
-
 		var sentAnything bool
-		for {
 
+		for {
+			// We're either establishing a new watch or it has been reset
+			// due to an error/expiration so create a new one at the most
+			// recent index.
 			if watcher == nil {
-				watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
+				watcher = l.getWatchAtLatestIndex(ctx, api, key, retry, valuesC)
 			}
 
 			if watcher != nil {
@@ -185,56 +185,51 @@ func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) 
 				}
 			}
 
-			if err != nil {
+			// The watcher has received a new event, send it to the client
+			// unless this value has already been sent.
+			if err == nil {
+				if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value && sentAnything {
+					continue
+				}
 				select {
-				case <-ticker.C:
-					steps += 1
-				}
-
-				if err == context.Canceled {
-					logger.Info("Context has been canceled.")
+				case valuesC <- resp.Node.Value:
+					sentAnything = true
+				case <-l.closeC:
+					logger.Info("Watcher is closing.")
 					return
-				} else if cerr, ok := err.(*client.ClusterError); ok {
-					if len(cerr.Errors) != 0 && cerr.Errors[0] == context.Canceled {
-						logger.WithError(cerr).Info("Context has been canceled.")
-						return
-					}
-					logger.WithError(cerr).Errorf("Etcd error: %v.", cerr.Detail())
-					continue
-				} else if IsWatchExpired(err) {
-					logger.Info("Watch has expired, resetting watch index.")
-					watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
-					if err != nil {
-						logger.WithError(err).Error("Failed to get watch at the latest index.")
-						continue
-					}
-				} else {
-					logger.WithError(err).Error("Unexpected watch error.")
-					// try recreating the watch if we get repeated unknown errors
-					if steps > 10 {
-						watcher, resp, err = l.getWatchAtLatestIndex(ctx, api, key, retry)
-						if err != nil {
-							logger.WithError(err).Error("Failed to get watch at the latest index.")
-							continue
-						}
-						backoff.Reset()
-						steps = 0
-					}
-
-					continue
 				}
-			}
-			// if nothing has changed and we previously sent this subscriber this value,
-			// do not bother subscriber with extra notifications
-			if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value && sentAnything {
 				continue
 			}
+
+			// Otherwise, the watcher encountered an error while waiting for
+			// next event, we may need to recreate it.
 			select {
-			case valuesC <- resp.Node.Value:
-				sentAnything = true
-			case <-l.closeC:
-				logger.Info("Watcher is closing.")
+			case <-ticker.C:
+				steps += 1
+			}
+
+			if IsContextCanceled(err) {
+				// The context has been canceled while watcher was waiting
+				// for next event.
+				logger.Info("Context has been canceled.")
 				return
+			} else if clusterErr, ok := err.(*client.ClusterError); ok {
+				// Got an etcd error, the watcher will retry.
+				logger.WithError(clusterErr).Errorf("Etcd error: %v.", clusterErr.Detail())
+			} else if IsWatchExpired(err) {
+				// The watcher has expired, reset it so it's recreated on the
+				// next loop cycle.
+				logger.Info("Watch has expired, resetting watch index.")
+				watcher = nil
+			} else {
+				// Unknown error, try recreating the watch after a few repeated
+				// unknown errors.
+				logger.WithError(err).Error("Unexpected watch error.")
+				if steps > 10 {
+					watcher = nil
+					backoff.Reset()
+					steps = 0
+				}
 			}
 		}
 	}()
@@ -305,14 +300,14 @@ func (l *Client) StepDown() {
 
 // getFirstValue returns the current value for key if it exists, or waits
 // for the value to appear and loops until client.Close is called
-func (l *Client) getFirstValue(key string, retryPeriod time.Duration) (*client.Response, error) {
+func (l *Client) getFirstValue(key string, retryPeriod time.Duration) *client.Response {
 	api := client.NewKeysAPI(l.client)
 	tick := time.NewTicker(retryPeriod)
 	defer tick.Stop()
 	for {
 		resp, err := api.Get(context.TODO(), key, nil)
 		if err == nil {
-			return resp, nil
+			return resp
 		} else if !IsNotFound(err) {
 			log.WithError(err).WithField("key", key).Error("Failed to query key.")
 		} else {
@@ -322,7 +317,7 @@ func (l *Client) getFirstValue(key string, retryPeriod time.Duration) (*client.R
 		case <-tick.C:
 		case <-l.closeC:
 			log.Info("Watcher got client close signal.")
-			return nil, nil
+			return nil
 		}
 	}
 }
@@ -401,6 +396,19 @@ func IsWatchExpired(err error) bool {
 	switch clientErr := err.(type) {
 	case client.Error:
 		return clientErr.Code == client.ErrorCodeEventIndexCleared
+	}
+	return false
+}
+
+// IsContextCanceled returns true if the provided error indicates canceled context.
+func IsContextCanceled(err error) bool {
+	if err == context.Canceled {
+		return true
+	}
+	if clusterErr, ok := err.(*client.ClusterError); ok {
+		if len(clusterErr.Errors) != 0 && clusterErr.Errors[0] == context.Canceled {
+			return true
+		}
 	}
 	return false
 }

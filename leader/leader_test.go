@@ -10,9 +10,9 @@ import (
 
 	"github.com/gravitational/coordinate/config"
 
-	"github.com/coreos/etcd/client"
 	"github.com/pborman/uuid"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/client"
 	. "gopkg.in/check.v1"
 )
 
@@ -25,7 +25,7 @@ type LeaderSuite struct {
 var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
-	log.SetOutput(os.Stderr)
+	logrus.SetOutput(os.Stderr)
 	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
 	if nodesString == "" {
 		// Skips the entire suite
