@@ -10,9 +10,9 @@ import (
 
 	"github.com/gravitational/coordinate/config"
 
-	"github.com/coreos/etcd/client"
 	"github.com/pborman/uuid"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/client"
 	. "gopkg.in/check.v1"
 )
 
@@ -25,7 +25,7 @@ type LeaderSuite struct {
 var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
-	log.SetOutput(os.Stderr)
+	logrus.SetOutput(os.Stderr)
 	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
 	if nodesString == "" {
 		// Skips the entire suite
@@ -36,14 +36,13 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 }
 
 func (s *LeaderSuite) newClient(c *C) *Client {
-	clt, err := NewClient(
-		Config{
-			ETCD: &config.Config{
-				Endpoints:               s.nodes,
-				HeaderTimeoutPerRequest: 100 * time.Millisecond,
-			},
-		},
-	)
+	etcdConfig := &config.Config{
+		Endpoints:               s.nodes,
+		HeaderTimeoutPerRequest: 100 * time.Millisecond,
+	}
+	etcdClient, err := etcdConfig.NewClient()
+	c.Assert(err, IsNil)
+	clt, err := NewClient(Config{Client: etcdClient})
 	c.Assert(err, IsNil)
 	return clt
 }
@@ -83,7 +82,7 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
-	api := client.NewKeysAPI(clt.client)
+	api := client.NewKeysAPI(clt.Client)
 	_, err := api.Set(context.TODO(), key, "first", nil)
 	c.Assert(err, IsNil)
 
@@ -97,19 +96,21 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 
 func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	clta := s.newClient(c)
-
 	cltb := s.newClient(c)
-	defer s.closeClient(c, cltb)
+	defer func() {
+		s.closeClient(c, clta)
+		s.closeClient(c, cltb)
+	}()
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
-	changeC := make(chan string)
+	changeC := make(chan string, 2)
 	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
 
-	// make sure we've elected voter a
+	// make sure voter a was elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
@@ -117,11 +118,12 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 		c.Fatalf("timeout waiting for event")
 	}
 
-	// add voter b to the equation
+	// add voter b to the election process
 	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
 
 	// now, shut down voter a
 	c.Assert(clta.Close(), IsNil)
+
 	// in a second, we should see the leader has changed
 	time.Sleep(time.Second)
 
@@ -134,19 +136,29 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	}
 }
 
-func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
+func (s *LeaderSuite) TestRemoveVoterIsIdempotent(c *C) {
 	clt := s.newClient(c)
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+	clt.RemoveVoter(context.Background(), key, "voter", time.Second)
+}
+
+func (s *LeaderSuite) TestLeaderReelection(c *C) {
+	clt1 := s.newClient(c)
+	clt2 := s.newClient(c)
+	defer func() {
+		s.closeClient(c, clt1)
+		s.closeClient(c, clt2)
+	}()
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt1.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
-	ctx, cancel := context.WithCancel(context.TODO())
-	err := clt.AddVoter(ctx, key, "voter a", time.Second)
-	c.Assert(err, IsNil)
+	clt1.AddVoter(context.Background(), key, "voter a", time.Second)
 
 	// make sure we've elected voter a
 	select {
@@ -157,10 +169,10 @@ func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
 	}
 
 	// add another voter
-	clt.AddVoter(context.TODO(), key, "voter b", time.Second)
+	clt2.AddVoter(context.Background(), key, "voter b", time.Second)
 
 	// now, shut down voter a
-	cancel()
+	clt1.RemoveVoter(context.Background(), key, "voter a", time.Second)
 	// in a second, we should see the leader has changed
 	time.Sleep(time.Second)
 
@@ -182,7 +194,7 @@ func (s *LeaderSuite) TestLeaderExtendLease(c *C) {
 	clt.AddVoter(context.TODO(), key, "voter a", time.Second)
 	time.Sleep(900 * time.Millisecond)
 
-	api := client.NewKeysAPI(clt.client)
+	api := client.NewKeysAPI(clt.Client)
 	re, err := api.Get(context.TODO(), key, nil)
 	c.Assert(err, IsNil)
 	expiresIn := re.Node.Expiration.Sub(time.Now())
@@ -196,7 +208,7 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/index/%v", uuid.New())
-	kapi := client.NewKeysAPI(clt.client)
+	kapi := client.NewKeysAPI(clt.Client)
 
 	changeC := make(chan string)
 	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
