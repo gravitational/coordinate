@@ -38,7 +38,7 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 func (s *LeaderSuite) newClient(c *C) *Client {
 	etcdConfig := &config.Config{
 		Endpoints:               s.nodes,
-		HeaderTimeoutPerRequest: 100 * time.Millisecond,
+		HeaderTimeoutPerRequest: 1 * time.Second,
 	}
 	etcdClient, err := etcdConfig.NewClient()
 	c.Assert(err, IsNil)
@@ -59,7 +59,7 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	clt.AddVoter(context.TODO(), key, "node1", time.Second)
@@ -79,7 +79,7 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	api := client.NewKeysAPI(clt.Client)
@@ -96,21 +96,19 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 
 func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	clta := s.newClient(c)
+	defer s.closeClient(c, clta)
 	cltb := s.newClient(c)
-	defer func() {
-		s.closeClient(c, clta)
-		s.closeClient(c, cltb)
-	}()
+	defer s.closeClient(c, cltb)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string, 2)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	cltb.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
-	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
+	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 
-	// make sure voter a was elected
+	// make sure 'voter a' was elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
@@ -119,15 +117,15 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	}
 
 	// add voter b to the election process
-	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
+	cltb.AddVoter(context.TODO(), key, "voter b", 1*time.Second)
 
-	// now, shut down voter a
+	// now, shut down 'voter a"
 	c.Assert(clta.Close(), IsNil)
 
-	// in a second, we should see the leader has changed
-	time.Sleep(time.Second)
+	// wait for leader to change
+	time.Sleep(2 * time.Second)
 
-	// make sure we've elected voter b
+	// make sure 'voter b' was elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter b")
@@ -155,7 +153,7 @@ func (s *LeaderSuite) TestLeaderReelection(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt1.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt1.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 	clt1.AddVoter(context.Background(), key, "voter a", time.Second)
@@ -191,14 +189,14 @@ func (s *LeaderSuite) TestLeaderExtendLease(c *C) {
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
-	clt.AddVoter(context.TODO(), key, "voter a", time.Second)
+	clt.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 	time.Sleep(900 * time.Millisecond)
 
 	api := client.NewKeysAPI(clt.Client)
-	re, err := api.Get(context.TODO(), key, nil)
+	resp, err := api.Get(context.TODO(), key, nil)
 	c.Assert(err, IsNil)
-	expiresIn := re.Node.Expiration.Sub(time.Now())
-	maxTTL := 500 * time.Millisecond
+	expiresIn := resp.Node.Expiration.Sub(time.Now())
+	const maxTTL = 500 * time.Millisecond
 	c.Assert(expiresIn > maxTTL, Equals, true, Commentf("%v > %v", expiresIn, maxTTL))
 }
 
@@ -211,7 +209,7 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	kapi := client.NewKeysAPI(clt.Client)
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 
@@ -246,15 +244,15 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
-	changeC := make(chan string)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
+	changeC := make(chan string, 2)
+	cltb.AddWatchCallback(key, func(key, prevVal, newVal string) {
 		changeC <- newVal
 	})
 
 	// add voter a
-	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
+	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 
-	// make sure we've elected voter a
+	// make sure voter a is elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
@@ -263,11 +261,11 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 	}
 
 	// add voter b
-	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
+	cltb.AddVoter(context.TODO(), key, "voter b", 1*time.Second)
 
 	// tell voter a to step down and wait for the next term
-	clta.StepDown()
-	time.Sleep(time.Second)
+	clta.StepDown(context.TODO())
+	time.Sleep(2 * time.Second)
 
 	// make sure voter b is elected
 	select {

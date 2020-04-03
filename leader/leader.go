@@ -77,10 +77,10 @@ type CallbackFn func(key, prevValue, newValue string)
 // made to the specified key's value. The callback is called with new and
 // previous values for the key. In the first call, both values are the same
 // and reflect the value of the key at that moment
-func (l *Client) AddWatchCallback(key string, retry time.Duration, fn CallbackFn) {
+func (l *Client) AddWatchCallback(key string, fn CallbackFn) {
 	go func() {
 		valuesC := make(chan string)
-		l.AddWatch(key, retry, valuesC)
+		l.AddWatch(key, valuesC)
 		var prev string
 		for {
 			select {
@@ -98,10 +98,7 @@ func (l *Client) AddWatchCallback(key string, retry time.Duration, fn CallbackFn
 // to the valuesC until the client is stopped.
 func (l *Client) AddWatch(key string, valuesC chan string) {
 	logger := log.WithField("key", key)
-	logger.WithFields(logrus.Fields{
-		"peers": l.Client.Endpoints(),
-		"retry": retry,
-	}).Info("Setting up watch.")
+	logger.WithField("peers", l.Client.Endpoints()).Info("Setting up watch.")
 
 	go l.watchLoop(key, valuesC, logger)
 }
@@ -134,8 +131,11 @@ func (l *Client) RemoveVoter(ctx context.Context, key, value string, term time.D
 }
 
 // StepDown makes this participant to pause his attempts to re-elect itself thus giving up its leadership
-func (l *Client) StepDown() {
-	l.pauseC <- true
+func (l *Client) StepDown(ctx context.Context) {
+	select {
+	case l.pauseC <- true:
+	case <-ctx.Done():
+	}
 }
 
 // Close stops current operations and releases resources
@@ -167,19 +167,19 @@ func (l *Client) watchLoop(key string, valuesC chan string, logger logrus.FieldL
 	// steps collects number of failed attempts due to unknown error so far
 	var steps int
 	tick := func(err error) (ok bool) {
+		if err == nil {
+			return true
+		}
+		if IsContextCanceled(err) {
+			// The context has been canceled while watcher was waiting
+			// for next event.
+			logger.Info("Context has been canceled.")
+			return false
+		}
 		select {
 		case <-l.closeC:
 			return false
 		case <-ticker.C:
-			if err == nil {
-				return true
-			}
-			if IsContextCanceled(err) {
-				// The context has been canceled while watcher was waiting
-				// for next event.
-				logger.Info("Context has been canceled.")
-				return false
-			}
 			if clusterErr, ok := err.(*client.ClusterError); ok {
 				// Got an etcd error, the watcher will retry.
 				logger.WithError(clusterErr).Errorf("Etcd error: %v.", clusterErr.Detail())
@@ -202,13 +202,13 @@ func (l *Client) watchLoop(key string, valuesC chan string, logger logrus.FieldL
 			return true
 		}
 	}
-	var sentAnything bool
 	for tick(err) {
 		if watcher == nil {
 			watcher, err = l.getWatchAtLatestIndex(ctx, api, key, valuesC)
 			if err != nil {
 				continue
 			}
+			// Successful return means the current value has been sent to receiver
 		}
 		resp, err = watcher.Next(ctx)
 		if err != nil {
@@ -217,12 +217,11 @@ func (l *Client) watchLoop(key string, valuesC chan string, logger logrus.FieldL
 		if resp.Node.Value == "" {
 			continue
 		}
-		if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value && sentAnything {
+		if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value {
 			continue
 		}
 		select {
 		case valuesC <- resp.Node.Value:
-			sentAnything = true
 		case <-l.closeC:
 			logger.Info("Watcher is closing.")
 			return
@@ -261,7 +260,7 @@ func (l *Client) voterLoop(key, value string, term time.Duration, enabled bool) 
 		case <-l.pauseC:
 			logger.Info("Step down.")
 			select {
-			case <-time.After(term * 2):
+			case <-time.After(term * 3):
 			case <-l.closeC:
 				return
 			}
@@ -314,8 +313,7 @@ func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, 
 		select {
 		case valuesC <- resp.Node.Value:
 		case <-l.closeC:
-			logger.Info("Watcher is closing.")
-			return nil, nil
+			return nil, trace.LimitExceeded("client closed")
 		}
 	}
 	// The watcher that will be receiving events after the value we got above.
