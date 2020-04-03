@@ -22,9 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gravitational/coordinate/leader/internal/clock"
-	"github.com/jonboulle/clockwork"
-
+	"github.com/cenkalti/backoff"
 	"github.com/gravitational/trace"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/client"
@@ -62,9 +60,6 @@ func (r *Config) checkAndSetDefaults() error {
 	if r.Client == nil {
 		return trace.BadParameter("Client is required")
 	}
-	if r.clock == nil {
-		r.clock = clock.NewRealClock()
-	}
 	return nil
 }
 
@@ -72,8 +67,6 @@ func (r *Config) checkAndSetDefaults() error {
 type Config struct {
 	// Client is the ETCD client to use
 	Client client.Client
-	// clock is the time provider for tests
-	clock clock.Clock
 }
 
 // CallbackFn specifies callback that is called by AddWatchCallback
@@ -103,14 +96,14 @@ func (l *Client) AddWatchCallback(key string, retry time.Duration, fn CallbackFn
 
 // AddWatch starts watching the key for changes and sending them
 // to the valuesC until the client is stopped.
-func (l *Client) AddWatch(key string, retry time.Duration, valuesC chan string) {
+func (l *Client) AddWatch(key string, valuesC chan string) {
 	logger := log.WithField("key", key)
 	logger.WithFields(logrus.Fields{
 		"peers": l.Client.Endpoints(),
 		"retry": retry,
 	}).Info("Setting up watch.")
 
-	go l.watchLoop(key, retry, valuesC, logger)
+	go l.watchLoop(key, valuesC, logger)
 }
 
 // AddVoter starts a goroutine that attempts to set the specified key to
@@ -155,84 +148,78 @@ func (l *Client) Close() error {
 	return nil
 }
 
-func (l *Client) watchLoop(key string, retry time.Duration, valuesC chan string, logger logrus.FieldLogger) {
+func (l *Client) watchLoop(key string, valuesC chan string, logger logrus.FieldLogger) {
 	api := client.NewKeysAPI(l.Client)
 	var watcher client.Watcher
 	var resp *client.Response
 	var err error
 
 	b := NewUnlimitedExponentialBackOff()
-	ticker := l.clock.NewTickerWithBackOff(b)
+	ticker := backoff.NewTicker(b)
 	defer ticker.Stop()
 
-	// steps collects number of failed attempts due to unknown error so far
-	var steps int
-	// classify errors and decide what to do.
-	// returns false to abort and exit or true to continue the loop
-	classify := func(err error) (ok bool) {
-		if err == nil {
-			return true
-		}
-		if IsContextCanceled(err) {
-			// The context has been canceled while watcher was waiting
-			// for next event.
-			logger.Info("Context has been canceled.")
-			return false
-		}
-		if clusterErr, ok := err.(*client.ClusterError); ok {
-			// Got an etcd error, the watcher will retry.
-			logger.WithError(clusterErr).Errorf("Etcd error: %v.", clusterErr.Detail())
-		} else if IsWatchExpired(err) {
-			// The watcher has expired, reset it so it's recreated on the
-			// next loop cycle.
-			logger.Info("Watch has expired, resetting watch index.")
-			watcher = nil
-		} else {
-			// Unknown error, try recreating the watch after a few repeated
-			// unknown errors.
-			logger.WithError(err).Error("Unexpected watch error.")
-			if steps > 10 {
-				watcher = nil
-				b.Reset()
-				steps = 0
-			}
-		}
-		return true
-	}
-	tick := func(err error) (ok bool) {
-		select {
-		case <-l.closeC:
-			return false
-		case <-ticker.Chan():
-			steps += 1
-			return classify(err)
-		}
-	}
-	var sentAnything bool
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-l.closeC
 		cancel()
 	}()
-	for tick(err) {
-		watcher, err = l.getWatchAtLatestIndex(ctx, api, key, retry, valuesC)
-		if err != nil {
-			continue
-		}
 
+	// steps collects number of failed attempts due to unknown error so far
+	var steps int
+	tick := func(err error) (ok bool) {
+		select {
+		case <-l.closeC:
+			return false
+		case <-ticker.C:
+			if err == nil {
+				return true
+			}
+			if IsContextCanceled(err) {
+				// The context has been canceled while watcher was waiting
+				// for next event.
+				logger.Info("Context has been canceled.")
+				return false
+			}
+			if clusterErr, ok := err.(*client.ClusterError); ok {
+				// Got an etcd error, the watcher will retry.
+				logger.WithError(clusterErr).Errorf("Etcd error: %v.", clusterErr.Detail())
+			} else if IsWatchExpired(err) {
+				// The watcher has expired, reset it so it's recreated on the
+				// next loop cycle.
+				logger.Info("Watch has expired, resetting watch index.")
+				watcher = nil
+			} else {
+				steps += 1
+				// Unknown error, try recreating the watch after a few repeated
+				// unknown errors.
+				logger.WithError(err).Error("Unexpected watch error.")
+				if steps > 10 {
+					watcher = nil
+					b.Reset()
+					steps = 0
+				}
+			}
+			return true
+		}
+	}
+	var sentAnything bool
+	for tick(err) {
+		if watcher == nil {
+			watcher, err = l.getWatchAtLatestIndex(ctx, api, key, valuesC)
+			if err != nil {
+				continue
+			}
+		}
 		resp, err = watcher.Next(ctx)
 		if err != nil {
 			continue
 		}
-
 		if resp.Node.Value == "" {
 			continue
 		}
-
 		if resp.PrevNode != nil && resp.PrevNode.Value == resp.Node.Value && sentAnything {
 			continue
 		}
-
 		select {
 		case valuesC <- resp.Node.Value:
 			sentAnything = true
@@ -254,7 +241,7 @@ func (l *Client) voterLoop(key, value string, term time.Duration, enabled bool) 
 		"value": value,
 		"term":  term,
 	})
-	var ticker clockwork.Ticker
+	var ticker *time.Ticker
 	var tickerC <-chan time.Time
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -266,15 +253,15 @@ func (l *Client) voterLoop(key, value string, term time.Duration, enabled bool) 
 		if err != nil {
 			logger.WithError(err).Warn("Failed to run election term.")
 		}
-		ticker = l.clock.NewTicker(term / 5)
-		tickerC = ticker.Chan()
+		ticker = time.NewTicker(term / 5)
+		tickerC = ticker.C
 	}
 	for {
 		select {
 		case <-l.pauseC:
 			logger.Info("Step down.")
 			select {
-			case <-l.clock.After(term * 2):
+			case <-time.After(term * 2):
 			case <-l.closeC:
 				return
 			}
@@ -298,8 +285,8 @@ func (l *Client) voterLoop(key, value string, term time.Duration, enabled bool) 
 				continue
 			}
 			if tickerC == nil {
-				ticker = l.clock.NewTicker(term / 5)
-				tickerC = ticker.Chan()
+				ticker = time.NewTicker(term / 5)
+				tickerC = ticker.C
 			}
 
 		case <-l.closeC:
@@ -311,10 +298,10 @@ func (l *Client) voterLoop(key, value string, term time.Duration, enabled bool) 
 	}
 }
 
-func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, retry time.Duration, valuesC chan string) (client.Watcher, error) {
+func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, key string, valuesC chan string) (client.Watcher, error) {
 	logger := log.WithField("key", key)
 	logger.Info("Recreating watch at the latest index.")
-	resp, err := l.getFirstValue(ctx, key, retry)
+	resp, err := api.Get(ctx, key, nil)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -341,31 +328,6 @@ func (l *Client) getWatchAtLatestIndex(ctx context.Context, api client.KeysAPI, 
 	return watcher, nil
 }
 
-// getFirstValue returns the current value for key if it exists, or waits
-// for the value to appear and loops until client.Close is called
-func (l *Client) getFirstValue(ctx context.Context, key string, retryPeriod time.Duration) (*client.Response, error) {
-	api := client.NewKeysAPI(l.Client)
-	ticker := l.clock.NewTicker(retryPeriod)
-	defer ticker.Stop()
-	for {
-		resp, err := api.Get(context.TODO(), key, nil)
-		if err == nil {
-			return resp, nil
-		} else if !IsNotFound(err) {
-			log.WithError(err).WithField("key", key).Error("Failed to query key.")
-		} else {
-			log.WithField("key", key).Info("Key not found, will retry.")
-		}
-		select {
-		case <-ticker.Chan():
-		case <-ctx.Done():
-			return nil, trace.Wrap(ctx.Err())
-		case <-l.closeC:
-			return nil, trace.LimitExceeded("received close sginal")
-		}
-	}
-}
-
 // elect is taken from: https://github.com/kubernetes/contrib/blob/master/pod-master/podmaster.go
 // this is a slightly modified version though, that does not return the result
 // instead we rely on watchers
@@ -390,7 +352,7 @@ func (l *Client) elect(ctx context.Context, key, value string, term time.Duratio
 	if resp.Node.Value != value {
 		return nil
 	}
-	if resp.Node.Expiration.Sub(l.clock.Now().UTC()) > time.Duration(term/2) {
+	if resp.Node.Expiration.Sub(time.Now().UTC()) > time.Duration(term/2) {
 		return nil
 	}
 
