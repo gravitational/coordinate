@@ -26,6 +26,9 @@ var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
 	logrus.SetOutput(os.Stderr)
+	if testing.Verbose() {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
 	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
 	if nodesString == "" {
 		// Skips the entire suite
@@ -59,9 +62,7 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	clt.AddWatchCallback(key, receiver(changeC))
 	clt.AddVoter(context.TODO(), key, "node1", time.Second)
 
 	select {
@@ -79,9 +80,7 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	clt.AddWatchCallback(key, receiver(changeC))
 	api := client.NewKeysAPI(clt.Client)
 	_, err := api.Set(context.TODO(), key, "first", nil)
 	c.Assert(err, IsNil)
@@ -103,9 +102,7 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string, 2)
-	cltb.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	cltb.AddWatchCallback(key, receiver(changeC))
 	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 
 	// make sure 'voter a' was elected
@@ -153,9 +150,7 @@ func (s *LeaderSuite) TestLeaderReelection(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt1.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	clt1.AddWatchCallback(key, receiver(changeC))
 	clt1.AddVoter(context.Background(), key, "voter a", time.Second)
 
 	// make sure we've elected voter a
@@ -209,9 +204,7 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	kapi := client.NewKeysAPI(clt.Client)
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	clt.AddWatchCallback(key, receiver(changeC))
 
 	last := ""
 	log.Info("setting our key 1100 times")
@@ -245,9 +238,7 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string, 2)
-	cltb.AddWatchCallback(key, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	cltb.AddWatchCallback(key, receiver(changeC))
 
 	// add voter a
 	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
@@ -273,5 +264,14 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 		c.Assert(val, Equals, "voter b")
 	case <-time.After(time.Second):
 		c.Fatalf("timeout waiting for event")
+	}
+}
+
+func receiver(ch chan<- string) CallbackFn {
+	return func(key, prevVal, newVal string) {
+		if newVal == "" || prevVal == newVal {
+			return
+		}
+		ch <- newVal
 	}
 }
