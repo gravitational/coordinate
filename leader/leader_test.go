@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -203,13 +204,14 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	key := fmt.Sprintf("/planet/tests/index/%v", uuid.New())
 	kapi := client.NewKeysAPI(clt.Client)
 
-	changeC := make(chan string)
-	clt.AddWatchCallback(key, receiver(changeC))
+	// Buffered to keep the last item
+	changeC := make(chan string, 1)
+	clt.AddWatchCallback(key, droppingReceiver(changeC))
 
 	last := ""
-	log.Info("setting our key 1100 times")
-	for i := 0; i < 1100; i++ {
-		val := fmt.Sprintf("%v", uuid.New())
+	log.Info("Set key 100 times.")
+	for i := 0; i < 100; i++ {
+		val := strconv.Itoa(i)
 		kapi.Set(context.Background(), key, val, nil)
 		last = val
 	}
@@ -222,8 +224,8 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 				log.Infof("got expected final value from watch")
 				return
 			}
-		case <-time.After(20 * time.Second):
-			c.Fatalf("never got anticipated last value from watch")
+		case <-time.After(5 * time.Second):
+			c.Fatalf("never got anticipated last value from watch: %v", last)
 		}
 	}
 }
@@ -271,6 +273,19 @@ func receiver(ch chan<- string) CallbackFn {
 	return func(key, prevVal, newVal string) {
 		if newVal == "" || prevVal == newVal {
 			return
+		}
+		ch <- newVal
+	}
+}
+
+func droppingReceiver(ch chan string) CallbackFn {
+	return func(key, prevVal, newVal string) {
+		if newVal == "" || prevVal == newVal {
+			return
+		}
+		select {
+		case <-ch:
+		default:
 		}
 		ch <- newVal
 	}
