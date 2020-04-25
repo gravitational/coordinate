@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 
 	"github.com/coreos/etcd/client"
 	"github.com/pborman/uuid"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	. "gopkg.in/check.v1"
 )
 
@@ -25,7 +26,10 @@ type LeaderSuite struct {
 var _ = Suite(&LeaderSuite{})
 
 func (s *LeaderSuite) SetUpSuite(c *C) {
-	log.SetOutput(os.Stderr)
+	logrus.SetOutput(os.Stderr)
+	if testing.Verbose() {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
 	nodesString := os.Getenv("COORDINATE_TEST_ETCD_NODES")
 	if nodesString == "" {
 		// Skips the entire suite
@@ -36,14 +40,13 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 }
 
 func (s *LeaderSuite) newClient(c *C) *Client {
-	clt, err := NewClient(
-		Config{
-			ETCD: &config.Config{
-				Endpoints:               s.nodes,
-				HeaderTimeoutPerRequest: 100 * time.Millisecond,
-			},
-		},
-	)
+	etcdConfig := &config.Config{
+		Endpoints:               s.nodes,
+		HeaderTimeoutPerRequest: 1 * time.Second,
+	}
+	etcdClient, err := etcdConfig.NewClient()
+	c.Assert(err, IsNil)
+	clt, err := NewClient(Config{Client: etcdClient})
 	c.Assert(err, IsNil)
 	return clt
 }
@@ -60,9 +63,7 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	clt.AddWatchCallback(key, receiver(changeC))
 	clt.AddVoter(context.TODO(), key, "node1", time.Second)
 
 	select {
@@ -80,10 +81,8 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
-	api := client.NewKeysAPI(clt.client)
+	clt.AddWatchCallback(key, receiver(changeC))
+	api := client.NewKeysAPI(clt.Client)
 	_, err := api.Set(context.TODO(), key, "first", nil)
 	c.Assert(err, IsNil)
 
@@ -97,19 +96,17 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 
 func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	clta := s.newClient(c)
-
+	defer s.closeClient(c, clta)
 	cltb := s.newClient(c)
 	defer s.closeClient(c, cltb)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
-	changeC := make(chan string)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
-	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
+	changeC := make(chan string, 2)
+	cltb.AddWatchCallback(key, receiver(changeC))
+	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 
-	// make sure we've elected voter a
+	// make sure 'voter a' was elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
@@ -117,15 +114,16 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 		c.Fatalf("timeout waiting for event")
 	}
 
-	// add voter b to the equation
-	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
+	// add voter b to the election process
+	cltb.AddVoter(context.TODO(), key, "voter b", 1*time.Second)
 
-	// now, shut down voter a
+	// now, shut down 'voter a"
 	c.Assert(clta.Close(), IsNil)
-	// in a second, we should see the leader has changed
-	time.Sleep(time.Second)
 
-	// make sure we've elected voter b
+	// wait for leader to change
+	time.Sleep(2 * time.Second)
+
+	// make sure 'voter b' was elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter b")
@@ -134,19 +132,27 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	}
 }
 
-func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
+func (s *LeaderSuite) TestRemoveVoterIsIdempotent(c *C) {
 	clt := s.newClient(c)
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+	clt.RemoveVoter(context.Background(), key, "voter", time.Second)
+}
+
+func (s *LeaderSuite) TestLeaderReelection(c *C) {
+	clt1 := s.newClient(c)
+	clt2 := s.newClient(c)
+	defer func() {
+		s.closeClient(c, clt1)
+		s.closeClient(c, clt2)
+	}()
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
 	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
-	ctx, cancel := context.WithCancel(context.TODO())
-	err := clt.AddVoter(ctx, key, "voter a", time.Second)
-	c.Assert(err, IsNil)
+	clt1.AddWatchCallback(key, receiver(changeC))
+	clt1.AddVoter(context.Background(), key, "voter a", time.Second)
 
 	// make sure we've elected voter a
 	select {
@@ -157,10 +163,10 @@ func (s *LeaderSuite) TestLeaderReelectionWithSingleClient(c *C) {
 	}
 
 	// add another voter
-	clt.AddVoter(context.TODO(), key, "voter b", time.Second)
+	clt2.AddVoter(context.Background(), key, "voter b", time.Second)
 
 	// now, shut down voter a
-	cancel()
+	clt1.RemoveVoter(context.Background(), key, "voter a", time.Second)
 	// in a second, we should see the leader has changed
 	time.Sleep(time.Second)
 
@@ -179,14 +185,14 @@ func (s *LeaderSuite) TestLeaderExtendLease(c *C) {
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
-	clt.AddVoter(context.TODO(), key, "voter a", time.Second)
+	clt.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 	time.Sleep(900 * time.Millisecond)
 
-	api := client.NewKeysAPI(clt.client)
-	re, err := api.Get(context.TODO(), key, nil)
+	api := client.NewKeysAPI(clt.Client)
+	resp, err := api.Get(context.TODO(), key, nil)
 	c.Assert(err, IsNil)
-	expiresIn := re.Node.Expiration.Sub(time.Now())
-	maxTTL := 500 * time.Millisecond
+	expiresIn := resp.Node.Expiration.Sub(time.Now())
+	const maxTTL = 500 * time.Millisecond
 	c.Assert(expiresIn > maxTTL, Equals, true, Commentf("%v > %v", expiresIn, maxTTL))
 }
 
@@ -196,17 +202,16 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	defer s.closeClient(c, clt)
 
 	key := fmt.Sprintf("/planet/tests/index/%v", uuid.New())
-	kapi := client.NewKeysAPI(clt.client)
+	kapi := client.NewKeysAPI(clt.Client)
 
-	changeC := make(chan string)
-	clt.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	// Buffered to keep the last item
+	changeC := make(chan string, 1)
+	clt.AddWatchCallback(key, droppingReceiver(changeC))
 
 	last := ""
-	log.Info("setting our key 1100 times")
-	for i := 0; i < 1100; i++ {
-		val := fmt.Sprintf("%v", uuid.New())
+	log.Info("Set key 100 times.")
+	for i := 0; i < 100; i++ {
+		val := strconv.Itoa(i)
 		kapi.Set(context.Background(), key, val, nil)
 		last = val
 	}
@@ -219,8 +224,8 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 				log.Infof("got expected final value from watch")
 				return
 			}
-		case <-time.After(20 * time.Second):
-			c.Fatalf("never got anticipated last value from watch")
+		case <-time.After(5 * time.Second):
+			c.Fatalf("never got anticipated last value from watch: %v", last)
 		}
 	}
 }
@@ -234,15 +239,13 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
-	changeC := make(chan string)
-	cltb.AddWatchCallback(key, 50*time.Millisecond, func(key, prevVal, newVal string) {
-		changeC <- newVal
-	})
+	changeC := make(chan string, 2)
+	cltb.AddWatchCallback(key, receiver(changeC))
 
 	// add voter a
-	clta.AddVoter(context.TODO(), key, "voter a", time.Second)
+	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
 
-	// make sure we've elected voter a
+	// make sure voter a is elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
@@ -251,11 +254,11 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 	}
 
 	// add voter b
-	cltb.AddVoter(context.TODO(), key, "voter b", time.Second)
+	cltb.AddVoter(context.TODO(), key, "voter b", 1*time.Second)
 
 	// tell voter a to step down and wait for the next term
-	clta.StepDown()
-	time.Sleep(time.Second)
+	clta.StepDown(context.TODO())
+	time.Sleep(2 * time.Second)
 
 	// make sure voter b is elected
 	select {
@@ -263,5 +266,27 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 		c.Assert(val, Equals, "voter b")
 	case <-time.After(time.Second):
 		c.Fatalf("timeout waiting for event")
+	}
+}
+
+func receiver(ch chan<- string) CallbackFn {
+	return func(key, prevVal, newVal string) {
+		if newVal == "" || prevVal == newVal {
+			return
+		}
+		ch <- newVal
+	}
+}
+
+func droppingReceiver(ch chan string) CallbackFn {
+	return func(key, prevVal, newVal string) {
+		if newVal == "" || prevVal == newVal {
+			return
+		}
+		select {
+		case <-ch:
+		default:
+		}
+		ch <- newVal
 	}
 }
