@@ -42,7 +42,7 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 func (s *LeaderSuite) newClient(c *C) *Client {
 	etcdConfig := &config.Config{
 		Endpoints:               s.nodes,
-		HeaderTimeoutPerRequest: 1 * time.Second,
+		HeaderTimeoutPerRequest: 5 * time.Second,
 	}
 	etcdClient, err := etcdConfig.NewClient()
 	c.Assert(err, IsNil)
