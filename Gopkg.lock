@@ -120,12 +120,13 @@
   version = "v1.2"
 
 [[projects]]
-  digest = "1:04457f9f6f3ffc5fea48e71d62f2ca256637dee0a04d710288e27e05c8b41976"
+  digest = "1:606ac2f6a6f9bead6084f97b45da98b2c612efa785febf4d546391a8ba254515"
   name = "github.com/sirupsen/logrus"
   packages = ["."]
   pruneopts = "UT"
-  revision = "839c75faf7f98a33d445d181f3018b5c3409a45e"
-  version = "v1.4.2"
+  revision = "9ebd8dcf727178553227307b785304594abef057"
+  source = "github.com/gravitational/logrus"
+  version = "v1.4.3"
 
 [[projects]]
   digest = "1:9a6cce05588eb1d696704c425d5839580e0167c08b53a7c3db57d3de6e5ab49e"
