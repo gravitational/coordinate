@@ -42,7 +42,7 @@ func (s *LeaderSuite) SetUpSuite(c *C) {
 func (s *LeaderSuite) newClient(c *C) *Client {
 	etcdConfig := &config.Config{
 		Endpoints:               s.nodes,
-		HeaderTimeoutPerRequest: 1 * time.Second,
+		HeaderTimeoutPerRequest: 5 * time.Second,
 	}
 	etcdClient, err := etcdConfig.NewClient()
 	c.Assert(err, IsNil)
@@ -70,7 +70,7 @@ func (s *LeaderSuite) TestLeaderElectSingle(c *C) {
 	case val := <-changeC:
 		c.Assert(val, Equals, "node1")
 	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+		c.Fatal("Timeout waiting for event.")
 	}
 }
 
@@ -90,7 +90,7 @@ func (s *LeaderSuite) TestReceiveExistingValue(c *C) {
 	case val := <-changeC:
 		c.Assert(val, Equals, "first")
 	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+		c.Fatal("Timeout waiting for event.")
 	}
 }
 
@@ -111,7 +111,7 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
 	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+		c.Fatal("Timeout waiting for event.")
 	}
 
 	// add voter b to the election process
@@ -128,7 +128,7 @@ func (s *LeaderSuite) TestLeaderTakeover(c *C) {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter b")
 	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+		c.Fatal("Timeout waiting for event.")
 	}
 }
 
@@ -141,6 +141,7 @@ func (s *LeaderSuite) TestRemoveVoterIsIdempotent(c *C) {
 }
 
 func (s *LeaderSuite) TestLeaderReelection(c *C) {
+	const term = 1 * time.Second
 	clt1 := s.newClient(c)
 	clt2 := s.newClient(c)
 	defer func() {
@@ -150,54 +151,65 @@ func (s *LeaderSuite) TestLeaderReelection(c *C) {
 
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
 
-	changeC := make(chan string)
+	changeC := make(chan string, 2)
 	clt1.AddWatchCallback(key, receiver(changeC))
-	clt1.AddVoter(context.Background(), key, "voter a", time.Second)
+	clt1.AddVoter(context.Background(), key, "voter a", term)
 
 	// make sure we've elected voter a
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
-	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+	case <-time.After(term):
+		c.Fatal("Timeout waiting for event.")
 	}
 
 	// add another voter
-	clt2.AddVoter(context.Background(), key, "voter b", time.Second)
+	clt2.AddVoter(context.Background(), key, "voter b", term)
 
 	// now, shut down voter a
-	clt1.RemoveVoter(context.Background(), key, "voter a", time.Second)
-	// in a second, we should see the leader has changed
-	time.Sleep(time.Second)
+	clt1.RemoveVoter(context.Background(), key, "voter a", term)
+	kapi := client.NewKeysAPI(clt1.Client)
+	// forcibly remove the key to simulate lease expiration
+	_, err := kapi.Delete(context.TODO(), key, &client.DeleteOptions{})
+	c.Assert(err, IsNil)
+
+	// in a second, we should see the leader change
+	time.Sleep(term)
 
 	// make sure we've elected voter b
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter b")
-	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+	case <-time.After(term):
+		c.Fatal("Timeout waiting for event.")
 	}
 }
 
 // Make sure leader extends lease in time
 func (s *LeaderSuite) TestLeaderExtendLease(c *C) {
+	const (
+		term   = 1 * time.Second
+		maxTTL = term / 2
+	)
 	clt := s.newClient(c)
 	defer s.closeClient(c, clt)
 
+	updateC := make(chan *client.Response, 1)
+	clt.updateLeaseC = updateC
 	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
-	clt.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
-	time.Sleep(900 * time.Millisecond)
+	clt.AddVoter(context.TODO(), key, "voter a", term)
 
-	api := client.NewKeysAPI(clt.Client)
-	resp, err := api.Get(context.TODO(), key, nil)
-	c.Assert(err, IsNil)
-	expiresIn := resp.Node.Expiration.Sub(time.Now())
-	const maxTTL = 500 * time.Millisecond
-	c.Assert(expiresIn > maxTTL, Equals, true, Commentf("%v > %v", expiresIn, maxTTL))
+	select {
+	case node := <-updateC:
+		c.Logf("Extended lease with expiration: %v.", node.Node.Expiration)
+	case <-time.After(1 * time.Second):
+		c.Fatal("Timeout waiting for lease update.")
+	}
 }
 
 // Make sure we can recover from getting an expired index from our watch
 func (s *LeaderSuite) TestHandleLostIndex(c *C) {
+	const numKeys = 100
 	clt := s.newClient(c)
 	defer s.closeClient(c, clt)
 
@@ -209,8 +221,8 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 	clt.AddWatchCallback(key, droppingReceiver(changeC))
 
 	last := ""
-	log.Info("Set key 100 times.")
-	for i := 0; i < 100; i++ {
+	c.Logf("Set key %v times.", numKeys)
+	for i := 0; i < numKeys; i++ {
 		val := strconv.Itoa(i)
 		kapi.Set(context.Background(), key, val, nil)
 		last = val
@@ -221,16 +233,17 @@ func (s *LeaderSuite) TestHandleLostIndex(c *C) {
 		case val := <-changeC:
 			log.Infof("got value: %s last: %s", val, last)
 			if val == last {
-				log.Infof("got expected final value from watch")
+				c.Logf("Got expected final value from watch.")
 				return
 			}
 		case <-time.After(5 * time.Second):
-			c.Fatalf("never got anticipated last value from watch: %v", last)
+			c.Fatalf("Never got anticipated last value from watch: %v.", last)
 		}
 	}
 }
 
 func (s *LeaderSuite) TestStepDown(c *C) {
+	const term = 1 * time.Second
 	clta := s.newClient(c)
 	defer s.closeClient(c, clta)
 
@@ -243,30 +256,41 @@ func (s *LeaderSuite) TestStepDown(c *C) {
 	cltb.AddWatchCallback(key, receiver(changeC))
 
 	// add voter a
-	clta.AddVoter(context.TODO(), key, "voter a", 1*time.Second)
+	clta.AddVoter(context.TODO(), key, "voter a", term)
 
 	// make sure voter a is elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter a")
-	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+	case <-time.After(2 * term):
+		c.Fatal("Timeout waiting for event.")
 	}
 
 	// add voter b
-	cltb.AddVoter(context.TODO(), key, "voter b", 1*time.Second)
+	cltb.AddVoter(context.TODO(), key, "voter b", term)
 
 	// tell voter a to step down and wait for the next term
 	clta.StepDown(context.TODO())
-	time.Sleep(2 * time.Second)
+	time.Sleep(2 * term)
 
 	// make sure voter b is elected
 	select {
 	case val := <-changeC:
 		c.Assert(val, Equals, "voter b")
-	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for event")
+	case <-time.After(term):
+		c.Fatal("Timeout waiting for event.")
 	}
+}
+
+func (s *LeaderSuite) TestCanSetupMultipleWatchesOnKey(c *C) {
+	clt := s.newClient(c)
+	defer s.closeClient(c, clt)
+
+	key := fmt.Sprintf("/planet/tests/elect/%v", uuid.New())
+	changeC := make(chan string)
+	clt.AddWatchCallback(key, receiver(changeC))
+	clt.AddWatchCallback(key, receiver(changeC))
+	clt.AddWatchCallback(key, receiver(changeC))
 }
 
 func receiver(ch chan<- string) CallbackFn {
