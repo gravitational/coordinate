@@ -1,6 +1,6 @@
 .PHONY: test stop
 
-TEST_ETCD_IMAGE := quay.io/coreos/etcd:v3.3.12
+TEST_ETCD_IMAGE := quay.io/coreos/etcd:v3.3.20
 TEST_ETCD_INSTANCE := coordinate0
 
 test:
@@ -23,7 +23,7 @@ test:
 			-listen-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001 \
 			-advertise-client-urls http://localhost:32379,http://localhost:34001; \
 	fi;
-	COORDINATE_TEST_ETCD_NODES=http://localhost:34001 go test -count=1 -race ./... -check.f=$(TC)
+	COORDINATE_TEST_ETCD_NODES=http://localhost:34001 go test -count=10 -race ./... -check.f=$(TC)
 
 stop:
 	docker stop $(TEST_ETCD_INSTANCE) && docker rm -v $(TEST_ETCD_INSTANCE)
