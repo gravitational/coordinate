@@ -1,6 +1,6 @@
-.PHONY: test
+.PHONY: test stop
 
-TEST_ETCD_IMAGE := quay.io/coreos/etcd:v2.3.7
+TEST_ETCD_IMAGE := quay.io/coreos/etcd:v3.3.20
 TEST_ETCD_INSTANCE := coordinate0
 
 test:
@@ -12,7 +12,18 @@ test:
 	  if [ "$$etcd_instance" != "" ]; then \
 	    docker rm -v $$etcd_instance; \
 	  fi; \
-	  docker run --name=$(TEST_ETCD_INSTANCE) -p 34001:4001 -p 32380:2380 -p 32379:2379 -d $(TEST_ETCD_IMAGE) -name etcd0 -listen-client-urls=http://0.0.0.0:2379,http://0.0.0.0:4001 -advertise-client-urls http://localhost:32379,http://localhost:34001; \
+	  docker run --name=$(TEST_ETCD_INSTANCE) \
+		--publish 34001:4001 \
+		--publish 32380:2380 \
+		--publish 32379:2379 \
+		--detach $(TEST_ETCD_IMAGE) \
+		etcd -name etcd0 \
+			--debug \
+			--enable-v2 \
+			-listen-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001 \
+			-advertise-client-urls http://localhost:32379,http://localhost:34001; \
 	fi;
-	COORDINATE_TEST_ETCD_NODES=http://127.0.0.1:34001 go test -v -test.parallel=0 ./...
+	COORDINATE_TEST_ETCD_NODES=http://localhost:34001 go test -count=10 -race ./... -check.f=$(TC)
 
+stop:
+	docker stop $(TEST_ETCD_INSTANCE) && docker rm -v $(TEST_ETCD_INSTANCE)
