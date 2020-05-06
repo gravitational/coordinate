@@ -1,11 +1,10 @@
-module github.com/gravitational/coordinate
+module github.com/gravitational/coordinate/v3
 
 go 1.12
 
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
-	github.com/coreos/go-systemd/v22 v22.0.0 // indirect
 	github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f // indirect
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/gravitational/trace v0.0.0-20200326194303-2d27a078e25b
@@ -14,7 +13,6 @@ require (
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
 	github.com/pborman/uuid v1.2.0
 	github.com/sirupsen/logrus v1.5.0
-	github.com/stretchr/objx v0.1.1 // indirect
 	go.etcd.io/etcd v0.0.0-20191023171146-3cf2f69b5738
 	go.uber.org/zap v1.15.0 // indirect
 	golang.org/x/crypto v0.0.0-20200423211502-4bdfaf469ed5 // indirect
