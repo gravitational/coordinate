@@ -294,16 +294,19 @@ func (s *LeaderSuite) TestCanSetupMultipleWatchesOnKey(c *C) {
 }
 
 func receiver(ch chan<- string) CallbackFn {
-	return func(key, prevVal, newVal string) {
+	return func(ctx context.Context, key, prevVal, newVal string) {
 		if newVal == "" || prevVal == newVal {
 			return
 		}
-		ch <- newVal
+		select {
+		case ch <- newVal:
+		case <-ctx.Done():
+		}
 	}
 }
 
 func droppingReceiver(ch chan string) CallbackFn {
-	return func(key, prevVal, newVal string) {
+	return func(ctx context.Context, key, prevVal, newVal string) {
 		if newVal == "" || prevVal == newVal {
 			return
 		}
@@ -311,6 +314,9 @@ func droppingReceiver(ch chan string) CallbackFn {
 		case <-ch:
 		default:
 		}
-		ch <- newVal
+		select {
+		case ch <- newVal:
+		case <-ctx.Done():
+		}
 	}
 }
