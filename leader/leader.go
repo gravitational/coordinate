@@ -90,7 +90,7 @@ type Config struct {
 
 // CallbackFn specifies callback that is called by AddWatchCallback
 // whenever leader changes
-type CallbackFn func(key, prevValue, newValue string)
+type CallbackFn func(ctx context.Context, key, prevValue, newValue string)
 
 // AddWatchCallback adds the given callback to be invoked when changes are
 // made to the specified key's value. The callback is called with new and
@@ -99,40 +99,45 @@ type CallbackFn func(key, prevValue, newValue string)
 func (l *Client) AddWatchCallback(key string, fn CallbackFn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	valuesC := make(chan string)
+	l.wg.Add(3)
 	go func() {
+		<-l.closeC
+		cancel()
+		l.wg.Done()
+	}()
+	go func() {
+		defer l.wg.Done()
 		var prev string
 		for {
 			select {
-			case <-l.closeC:
-				cancel()
-				return
 			case val := <-valuesC:
-				fn(key, prev, val)
+				fn(ctx, key, prev, val)
 				prev = val
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
-	l.wg.Add(1)
-	l.addWatch(ctx, key, valuesC)
+	go func() {
+		l.watchLoop(ctx, key, valuesC)
+		l.wg.Done()
+	}()
 }
 
 // AddWatch starts watching the key for changes and sending them
 // to the valuesC until the client is stopped.
 func (l *Client) AddWatch(key string, valuesC chan string) {
 	ctx, cancel := context.WithCancel(context.Background())
+	l.wg.Add(2)
 	go func() {
 		<-l.closeC
 		cancel()
+		l.wg.Done()
 	}()
-	l.wg.Add(1)
-	l.addWatch(ctx, key, valuesC)
-}
-
-func (l *Client) addWatch(ctx context.Context, key string, valuesC chan string) {
-	logger := log.WithField("key", key)
-	logger.WithField("peers", l.Client.Endpoints()).Info("Setting up watch.")
-
-	go l.watchLoop(ctx, key, valuesC, logger)
+	go func() {
+		l.watchLoop(ctx, key, valuesC)
+		l.wg.Done()
+	}()
 }
 
 // AddVoter starts a goroutine that attempts to set the specified key to
@@ -192,8 +197,12 @@ func (l *Client) startVoterLoop(key, value string, term time.Duration, enabled b
 	go l.voterLoop(ctx, key, value, term, enabled)
 }
 
-func (l *Client) watchLoop(ctx context.Context, key string, valuesC chan string, logger logrus.FieldLogger) {
-	defer l.wg.Done()
+func (l *Client) watchLoop(ctx context.Context, key string, valuesC chan string) {
+	logger := log.WithFields(logrus.Fields{
+		"key":   key,
+		"peers": l.Client.Endpoints(),
+	})
+	logger.Info("Setting up watch.")
 	boff := newBackoff()
 	// maxFailedSteps sets the limit on the number of failed attempts before the watch
 	// is forcibly reset
