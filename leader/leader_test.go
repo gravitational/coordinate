@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gravitational/coordinate/config"
+	"github.com/gravitational/coordinate/v4/config"
 
 	"github.com/pborman/uuid"
 	"github.com/sirupsen/logrus"
