@@ -1,6 +1,6 @@
 module github.com/gravitational/coordinate/v4
 
-go 1.15
+go 1.12
 
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible
